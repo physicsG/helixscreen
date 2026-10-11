@@ -7,6 +7,7 @@
 #include "ui_ams_detail.h"
 #include "ui_ams_edit_overlay.h"
 #include "ui_ams_sidebar.h"
+#include "ui_ams_toolhead_menu.h"
 #include "ui_bypass_spool_widget.h"
 #include "ui_observer_guard.h"
 #include "ui_panel_base.h"
@@ -122,6 +123,10 @@ class AmsOverviewPanel : public PanelBase {
      */
     void show_overview();
 
+    /// Back out of the unit view, to wherever the page on screen was entered
+    /// FROM: the page that opened it through "Open in <unit>", else the cards.
+    void leave_unit_view();
+
     /**
      * @brief Check if the unit view (rather than the overview) is on screen
      */
@@ -193,7 +198,11 @@ class AmsOverviewPanel : public PanelBase {
     std::vector<std::string> page_units_;
     int page_ = -1;
     std::string shown_unit_key_; ///< identity of the unit on screen
-    int pages_refreshes_ = 0;    ///< sync_pages() runs, for tests
+    /// Identity of the unit whose page Back returns to, or empty for the cards.
+    /// Set when a slot whose spool another unit describes opens that unit's
+    /// page; a key rather than a position because positions move on rebuild.
+    std::string return_unit_key_;
+    int pages_refreshes_ = 0; ///< sync_pages() runs, for tests
 
     // === Observers ===
     ObserverGuard slots_version_observer_;
@@ -260,10 +269,14 @@ class AmsOverviewPanel : public PanelBase {
     static void on_unit_view_gesture(lv_event_t* e);
 
     // === Slot Interaction ===
-    std::unique_ptr<helix::ui::AmsContextMenu> context_menu_; ///< Slot context menu (lazy init)
+    std::unique_ptr<helix::ui::AmsContextMenu> context_menu_;   ///< Slot context menu (lazy init)
+    std::unique_ptr<helix::ui::AmsToolheadMenu> toolhead_menu_; ///< Per-nozzle menu (lazy init)
 
     void handle_detail_slot_tap(int global_slot_index, lv_point_t click_pt);
     void show_detail_context_menu(int slot_index, lv_obj_t* near_widget, lv_point_t click_pt);
+    /// Page to the unit at position @p owner_unit, remembering the page left so
+    /// Back returns to it (the slot menu's OPEN_SOURCE_UNIT).
+    void open_source_unit(int owner_unit);
 
     // === Bypass Spool Interaction ===
     // The overview's overlay sits on the system path canvas, the unit view's on its own
@@ -277,6 +290,11 @@ class AmsOverviewPanel : public PanelBase {
     /// @p node is whether the bypass node belongs on the path (bypass_node_visible_for).
     void refresh_page_bypass(bool node);
     static void on_bypass_spool_clicked(lv_event_t* e);
+
+    /// Tap on a nozzle in the system path's toolhead row. @p tool_index is the
+    /// tool number on the badge; helix::ui::show_toolhead_menu_at_touch()
+    /// resolves it and runs the shared menu.
+    static void on_toolhead_clicked(int tool_index, void* user_data);
 
     // === Sidebar ===
     std::unique_ptr<helix::ui::AmsOperationSidebar> sidebar_;

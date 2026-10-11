@@ -62,6 +62,7 @@ BackendCaps read_backend_caps(AmsBackend* backend, AmsSystemInfo& info_out, int 
     caps.present = true;
     caps.requires_slot_selection_for_load = backend->requires_slot_selection_for_load();
     caps.needs_unload_before_load = backend->needs_unload_before_load(info_out, target_slot);
+    caps.change_tool_completes_load = backend->change_tool_completes_load(target_slot);
     caps.is_tool_changer = backend->get_type() == AmsType::TOOL_CHANGER;
     // Distinct from !requires_slot_selection_for_load(): plan_load() needs to
     // tell "bypass is suppressing the lane tier" apart from "this backend

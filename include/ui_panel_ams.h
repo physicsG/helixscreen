@@ -9,6 +9,7 @@
 #include "ui_ams_loading_error_modal.h"
 #include "ui_ams_selector_menu.h"
 #include "ui_ams_sidebar.h"
+#include "ui_ams_toolhead_menu.h"
 #include "ui_bypass_spool_widget.h"
 #include "ui_observer_guard.h"
 #include "ui_panel_base.h"
@@ -165,6 +166,7 @@ class AmsPanel : public PanelBase {
 
     std::unique_ptr<helix::ui::AmsContextMenu> context_menu_;      ///< Slot context menu
     std::unique_ptr<helix::ui::AmsSelectorMenu> selector_menu_;    ///< Selector/hub context menu
+    std::unique_ptr<helix::ui::AmsToolheadMenu> toolhead_menu_;    ///< Per-nozzle context menu
     std::unique_ptr<helix::ui::AmsLoadingErrorModal> error_modal_; ///< Loading error modal
     std::unique_ptr<helix::ui::AmsOperationSidebar> sidebar_;      ///< Shared sidebar component
 
@@ -295,6 +297,16 @@ class AmsPanel : public PanelBase {
      * Opens the Happy Hare selector context menu (selector-only backends).
      */
     void on_path_hub_clicked(lv_point_t click_pt);
+
+    /**
+     * @brief Nozzle tap on a PARALLEL canvas: open the per-toolhead menu.
+     *
+     * Mount/park is a carriage question, not a lane one, so it gets its own
+     * menu instead of the per-slot one. @p tool_index is the tool number on the
+     * badge under the nozzle; helix::ui::show_toolhead_menu_at_touch() does the
+     * rest.
+     */
+    static void on_path_toolhead_clicked(int tool_index, void* user_data);
 
     /**
      * @brief Handle click on bypass spool box in path canvas

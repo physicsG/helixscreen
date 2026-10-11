@@ -6,6 +6,10 @@
 #include <string>
 #include <string_view>
 
+namespace helix {
+class AmsBackend;
+} // namespace helix
+
 namespace helix::ui {
 
 /**
@@ -79,6 +83,20 @@ std::string noun_text(LaneNoun noun);
  * @return empty when @p index is negative
  */
 std::string lane_label(LaneNoun noun, int index);
+
+/**
+ * @brief A backend slot as its badge reads: "Slot 4", "Lane 2".
+ *
+ * @p backend's own noun with the number the slot's badge shows. That number is
+ * the slot's place among the positions holding a spool of their own
+ * (AmsBackend::spool_display_number()), so a slot that only views another
+ * slot's spool is named with that spool's number. Identical to
+ * lane_label(backend.lane_noun(), slot_index) on every backend whose slots all
+ * own their spools.
+ *
+ * @return empty when @p slot_index is negative
+ */
+std::string backend_lane_label(const helix::AmsBackend& backend, int slot_index);
 
 /**
  * @brief The refusal a Clear Spool shows when the lane feeds the active print.

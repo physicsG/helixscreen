@@ -45,8 +45,10 @@ TEST_CASE_METHOD(
     "ObserverGuard removes observer from a teardown-exempt subject after invalidate_all",
     "[observer][raii][crash_hardening]") {
     // Standalone subject the registry never deinits — the shape of the theme
-    // globals, reseeded in place, declared exempt by their owner.
-    lv_subject_t subject;
+    // globals, reseeded in place, declared exempt by their owner. Static, like
+    // those globals: the exemption is keyed on the address and never cleared, so
+    // a stack subject would exempt whichever later test's subject reuses its slot.
+    static lv_subject_t subject;
     lv_subject_init_int(&subject, 0);
     ObserverGuard::mark_subject_teardown_exempt(&subject);
     REQUIRE(lv_ll_get_len(&subject.subs_ll) == 0);

@@ -65,9 +65,11 @@ generate_bundle() {
 # Fail fast on any error
 set -e
 
-# Configuration
-GITHUB_REPO="prestonbrown/helixscreen"
-SERVICE_NAME="helixscreen"
+# Configuration. Soft assignments so the environment wins — see the note in
+# bundle-installer.sh; an uninstall has to be able to name the same repo the
+# install used, or it rewrites moonraker.conf back to upstream.
+: "${GITHUB_REPO:=prestonbrown/helixscreen}"
+: "${SERVICE_NAME:=helixscreen}"
 
 # Previous UIs we may need to re-enable (for scanning). qidi-client and
 # makerbase-client are the QIDI stock screen units. The Sovol mksclient is left

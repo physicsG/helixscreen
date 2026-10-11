@@ -104,6 +104,15 @@ std::string lane_label(LaneNoun noun, int index) {
     return noun_text(noun) + " " + std::to_string(n);
 }
 
+std::string backend_lane_label(const helix::AmsBackend& backend, int slot_index) {
+    if (slot_index < 0)
+        return {};
+    // spool_display_number() is already the 1-based number shown, so it is
+    // spelled directly rather than stepped back through lane_number().
+    return noun_text(backend.lane_noun()) + " " +
+           std::to_string(backend.spool_display_number(slot_index));
+}
+
 std::string clear_spool_blocked_hint(LaneNoun noun, int index) {
     // lv_tr() returns the format string in the active locale; fmt::format
     // substitutes the label, the same composition NOTIFY_INFO uses for the

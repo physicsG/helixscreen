@@ -190,9 +190,11 @@ struct AmsMiniStatusData {
     int spools_built_h = 0;
     std::vector<int> spool_cell_obj_slots; // slot each pooled cell was built for
 
-    // Slots inside an absent unit (a box that is not on the bus): neither drawn
-    // nor counted in the "+N" overflow.
-    std::vector<int> absent_slots;
+    // Slots that get no bar and no cell, and are not counted in the "+N"
+    // overflow: those inside an absent unit (a box that is not on the bus), and
+    // those fed from another unit, which show that unit's spool and would draw
+    // one physical spool twice. See slot_gets_no_bar().
+    std::vector<int> undrawn_slots;
 
     // Auto-binding observer (observe AmsState slots_version subject)
     // Uses ObserverGuard for RAII lifecycle management
@@ -291,6 +293,31 @@ static lv_obj_t* create_lane_bar(lv_obj_t* parent, int slot_index, int32_t bar_w
     return bar;
 }
 
+/// Whether @p slot gets no bar: its unit is not on the bus, or another unit
+/// owns its spool identity, so the spool is already drawn in that unit's row.
+static bool slot_gets_no_bar(const helix::AmsBackend& backend, const helix::AmsSystemInfo& info,
+                             int slot) {
+    return info.slot_absent(slot) || backend.slot_identity_owner_unit(slot).has_value();
+}
+
+/// The last sync's answer to slot_gets_no_bar() for @p slot.
+static bool slot_undrawn(const AmsMiniStatusData* data, int slot) {
+    return std::find(data->undrawn_slots.begin(), data->undrawn_slots.end(), slot) !=
+           data->undrawn_slots.end();
+}
+
+/// How many of unit row @p u's slots get a bar, before the width cap.
+static int drawable_row_slots(const AmsMiniStatusData* data, int u) {
+    const UnitRowInfo& row = data->unit_rows[u];
+    int n = 0;
+    for (int s = 0; s < row.slot_count; ++s) {
+        if (!slot_undrawn(data, row.first_slot + s)) {
+            ++n;
+        }
+    }
+    return n;
+}
+
 /** Rebuild the bars based on slot_count, max_visible, and unit_count */
 static void rebuild_bars(AmsMiniStatusData* data) {
     if (!data || !data->bars_container)
@@ -328,10 +355,28 @@ static void rebuild_bars(AmsMiniStatusData* data) {
     int max_vis = effective_max_visible(data);
     int visible_count = std::min(data->slot_count, max_vis);
     int overflow_count = 0;
-    for (int i = visible_count; i < data->slot_count; ++i) {
-        if (std::find(data->absent_slots.begin(), data->absent_slots.end(), i) ==
-            data->absent_slots.end()) {
-            ++overflow_count;
+    // Bars each stacked unit row draws: the row's drawable slots, capped by the
+    // width heuristic and by what is left of the bar pool.
+    int row_bars[8] = {};
+    if (data->unit_count > 1) {
+        // Stacked rows: max_vis is a WIDTH heuristic ("this many bars fit
+        // across"), so it caps each row rather than their sum. The "+N" badge
+        // counts against what the row loop below actually draws.
+        int drawable = 0;
+        visible_count = 0;
+        for (int u = 0; u < data->unit_count && u < 8; ++u) {
+            const int row_drawable = drawable_row_slots(data, u);
+            drawable += row_drawable;
+            row_bars[u] =
+                std::min({row_drawable, max_vis, AMS_MINI_STATUS_MAX_VISIBLE - visible_count});
+            visible_count += row_bars[u];
+        }
+        overflow_count = drawable - visible_count;
+    } else {
+        for (int i = visible_count; i < data->slot_count; ++i) {
+            if (!slot_undrawn(data, i)) {
+                ++overflow_count;
+            }
         }
     }
 
@@ -408,9 +453,7 @@ static void rebuild_bars(AmsMiniStatusData* data) {
         // Count visible rows (units with bars within max visible)
         int visible_rows = 0;
         for (int u = 0; u < data->unit_count && u < 8; ++u) {
-            int row_slots =
-                std::min(data->unit_rows[u].slot_count, max_vis - data->unit_rows[u].first_slot);
-            if (row_slots > 0)
+            if (row_bars[u] > 0)
                 ++visible_rows;
         }
         if (visible_rows < 1)
@@ -437,47 +480,58 @@ static void rebuild_bars(AmsMiniStatusData* data) {
         }
 
         // Process each unit row
+        int pool_next = 0;
         for (int u = 0; u < data->unit_count && u < 8; ++u) {
             UnitRowInfo* row_info = &data->unit_rows[u];
             lv_obj_t* row = ensure_unit_row(data, u);
 
-            // Calculate bar width for this row based on its slot count
-            int row_slots = std::min(row_info->slot_count, max_vis - row_info->first_slot);
-            if (row_slots < 0)
-                row_slots = 0;
+            // The width cap belongs to each row, not to the rows' sum: a row is
+            // not charged for the bars of the rows above it.
+            const int row_slots = row_bars[u];
+            int drawn = 0;
 
             int32_t max_bw = effective_max_bar_width(data);
             int32_t bar_width = ams_draw::calc_bar_width(container_width, row_slots, gap,
                                                          MIN_BAR_WIDTH_PX, max_bw, 90);
 
-            // Create/update slots in this unit row
-            for (int s = 0; s < row_info->slot_count; ++s) {
+            // Create/update slots in this unit row. The pool is filled in draw
+            // order, not by slot index: slots that get no bar would otherwise
+            // hold pool entries the drawn ones need, and a unit past the pool's
+            // size could never show a bar.
+            for (int s = 0; s < row_info->slot_count && drawn < row_slots; ++s) {
                 int global_idx = row_info->first_slot + s;
-                if (global_idx >= AMS_MINI_STATUS_MAX_VISIBLE)
-                    break;
+                if (slot_undrawn(data, global_idx))
+                    continue;
 
-                lv_obj_t* bar = data->lane_bars[global_idx];
-
-                if (global_idx < visible_count) {
-                    if (!bar) {
-                        bar = create_lane_bar(row, global_idx, bar_width, bar_height);
-                        data->lane_bars[global_idx] = bar;
-                    } else {
-                        if (lv_obj_get_parent(bar) != row) {
-                            // Reparent the pooled bar into its unit row
-                            lv_obj_set_parent(bar, row);
-                        }
-                        helix::ui::ams_lane_bar_resize(bar, bar_width, bar_height);
-                    }
-
-                    // Override to fill row height (multi-unit responsive mode)
-                    lv_obj_set_height(bar, LV_PCT(100));
-                    lv_obj_set_style_flex_grow(lv_obj_find_by_name(bar, "bar_bg"), 1, LV_PART_MAIN);
-
-                    lv_obj_remove_flag(bar, LV_OBJ_FLAG_HIDDEN);
-                } else if (bar) {
+                lv_obj_t*& bar = data->lane_bars[pool_next++];
+                // A bar binds its slot's subjects when it is created, so a pool
+                // entry built for another slot is replaced, not repointed.
+                if (bar && helix::ui::ams_lane_bar_slot_index(bar) != global_idx) {
                     lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_delete_async(bar);
+                    bar = nullptr;
                 }
+                if (!bar) {
+                    bar = create_lane_bar(row, global_idx, bar_width, bar_height);
+                    if (!bar)
+                        continue;
+                } else {
+                    if (lv_obj_get_parent(bar) != row) {
+                        // Reparent the pooled bar into its unit row
+                        lv_obj_set_parent(bar, row);
+                    }
+                    helix::ui::ams_lane_bar_resize(bar, bar_width, bar_height);
+                }
+                // Child order is draw order, whichever of the three ways the
+                // bar arrived in this row.
+                lv_obj_move_to_index(bar, drawn);
+                ++drawn;
+
+                // Override to fill row height (multi-unit responsive mode)
+                lv_obj_set_height(bar, LV_PCT(100));
+                lv_obj_set_style_flex_grow(lv_obj_find_by_name(bar, "bar_bg"), 1, LV_PART_MAIN);
+
+                lv_obj_remove_flag(bar, LV_OBJ_FLAG_HIDDEN);
             }
 
             // Condemn row if no visible bars (hidden rows still consume flex gap)
@@ -485,6 +539,12 @@ static void rebuild_bars(AmsMiniStatusData* data) {
                 condemn_row(row);
                 data->unit_rows[u].row_container = nullptr;
             }
+        }
+
+        // Pool entries no row claimed this time.
+        for (int k = pool_next; k < AMS_MINI_STATUS_MAX_VISIBLE; ++k) {
+            if (data->lane_bars[k])
+                lv_obj_add_flag(data->lane_bars[k], LV_OBJ_FLAG_HIDDEN);
         }
 
         spdlog::debug("[AmsMiniStatus] Multi-unit layout: {} units, {} total slots",
@@ -519,6 +579,14 @@ static void rebuild_bars(AmsMiniStatusData* data) {
         // Create/update bars
         for (int i = 0; i < AMS_MINI_STATUS_MAX_VISIBLE; i++) {
             lv_obj_t* bar = data->lane_bars[i];
+            // The stacked layout pools bars in draw order, so an entry it left
+            // here can be bound to another slot; a bar is bound at creation.
+            if (bar && i < visible_count && helix::ui::ams_lane_bar_slot_index(bar) != i) {
+                lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_delete_async(bar);
+                bar = nullptr;
+                data->lane_bars[i] = nullptr;
+            }
 
             if (i < visible_count) {
                 if (!bar) {
@@ -720,8 +788,12 @@ static lv_obj_t* create_spool_cell(lv_obj_t* parent, int slot_index, int spool_s
     if (!lspool)
         spdlog::error("[AmsMiniStatus] ams_lane_spool creation failed for slot {}", slot_index);
 
-    lv_obj_t* badge = ams_draw::create_lane_badge(wrap, helix::ui::lane_number(slot_index),
-                                                  spool_size * 2 / 5, false);
+    // Numbered as the slot's own badge is: among the positions holding a spool
+    // of their own, so the cells skipped as undrawn leave no gap in the count.
+    const helix::AmsBackend* badge_backend = helix::AmsState::instance().get_backend();
+    const int badge_number = badge_backend ? badge_backend->spool_display_number(slot_index)
+                                           : helix::ui::lane_number(slot_index);
+    lv_obj_t* badge = ams_draw::create_lane_badge(wrap, badge_number, spool_size * 2 / 5, false);
     if (badge) {
         snprintf(nm, sizeof(nm), "spool_badge_%d", slot_index);
         lv_obj_set_name(badge, nm);
@@ -1384,7 +1456,7 @@ static void sync_from_ams_state(AmsMiniStatusData* data) {
     // Get multi-unit info from system info
     helix::AmsSystemInfo info = backend->get_system_info();
     data->unit_count = static_cast<int>(info.units.size());
-    data->absent_slots.clear();
+    data->undrawn_slots.clear();
     for (int u = 0; u < data->unit_count && u < 8; ++u) {
         data->unit_rows[u].first_slot = info.units[u].first_slot_global_index;
         // An absent unit's bays are not drawn: the row is condemned for having
@@ -1392,8 +1464,8 @@ static void sync_from_ams_state(AmsMiniStatusData* data) {
         data->unit_rows[u].slot_count = info.units[u].absent ? 0 : info.units[u].slot_count;
     }
     for (int i = 0; i < slot_count; ++i) {
-        if (info.slot_absent(i)) {
-            data->absent_slots.push_back(i);
+        if (slot_gets_no_bar(*backend, info, i)) {
+            data->undrawn_slots.push_back(i);
         }
     }
     // Clear any stale unit rows beyond current count
@@ -1413,7 +1485,7 @@ static void sync_from_ams_state(AmsMiniStatusData* data) {
     data->spool_cells.clear();
     data->spool_cells.reserve(static_cast<size_t>(slot_count));
     for (int i = 0; i < slot_count; ++i) {
-        if (info.slot_absent(i)) {
+        if (slot_undrawn(data, i)) {
             continue;
         }
         helix::SlotInfo slot = backend->get_slot_info(i);

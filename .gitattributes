@@ -8,3 +8,11 @@ assets/test_gcodes/** linguist-vendored
 # Needs the driver from `make setup`; unregistered, git falls back to a text
 # merge and these files conflict whenever two branches both cited a lesson.
 .claude-recall/*.json merge=recall-stats
+
+# This fork's README is its own document, not a patched copy of upstream's.
+# Upstream touches README.md every couple of days, so without this every merge
+# of main into develop conflicts on a file whose two sides were never meant to
+# be reconciled. `ours` keeps this fork's version untouched and drops upstream's
+# change. Needs the driver from `make setup`; unregistered, git falls back to a
+# text merge and the conflicts come back.
+README.md merge=ours

@@ -115,11 +115,36 @@ struct GlobalRoute {
     int group = 0; // shared hub this route joins (SystemPathData::unit_hub_group), 0 = own hub
 };
 
-// A unit that can place a hub box on a nozzle: HUB topology, present, with a tool.
+// Whether @p u's lanes combine inside the unit and land on a nozzle that is
+// one of ANOTHER unit's individual heads (a PARALLEL or MIXED unit's: a
+// toolchanger's). A hub box at that toolhead would say the lanes combine
+// there, as though the head were a combiner; the nozzle is simply shared.
+//
+// Two HUB units on one nozzle share it as equals and each keeps its box:
+// only a heads-unit owning the nozzle takes the box away.
+bool feeds_another_units_head(const SystemPathData& data, int u) {
+    if (u < 0 || u >= data.unit_count || u >= SystemPathData::MAX_UNITS ||
+        data.unit_topology[u] == TOPO_PARALLEL || data.unit_topology[u] == TOPO_MIXED ||
+        data.unit_tool_count[u] <= 0)
+        return false;
+    const int tool = data.unit_first_tool[u];
+    for (int o = 0; o < data.unit_count && o < SystemPathData::MAX_UNITS; ++o) {
+        if (o == u || data.unit_absent[o] ||
+            (data.unit_topology[o] != TOPO_PARALLEL && data.unit_topology[o] != TOPO_MIXED))
+            continue;
+        if (tool >= data.unit_first_tool[o] &&
+            tool < data.unit_first_tool[o] + data.unit_tool_count[o])
+            return true;
+    }
+    return false;
+}
+
+// A unit that can place a hub box on a nozzle: HUB topology, present, with a
+// tool of its own to stand the box on.
 bool places_hub(const SystemPathData& data, int u) {
     return u >= 0 && u < data.unit_count && u < SystemPathData::MAX_UNITS &&
            data.unit_topology[u] != TOPO_PARALLEL && data.unit_topology[u] != TOPO_MIXED &&
-           data.unit_tool_count[u] > 0;
+           data.unit_tool_count[u] > 0 && !feeds_another_units_head(data, u);
 }
 
 // Units sharing one hub box: those carrying the same non-zero unit_hub_group on
@@ -207,6 +232,10 @@ int collect_parallel_mixed_routes(const SystemPathData& data, const SysLayout& L
     for (int t = 0; t < tool_count && (first_tool + t) < data.total_tools; ++t) {
         if (n >= SystemPathData::MAX_TOOLS)
             break;
+        // A cleared bit means this unit owns the nozzle but does not feed it;
+        // a route there would show two units supplying one nozzle.
+        if (data.unit_tool_mask_set[i] && t < 32 && (data.unit_tool_mask[i] & (1u << t)) == 0)
+            continue;
         int tool_idx = first_tool + t;
         int32_t tool_x = calc_tool_x(tool_idx, data.total_tools, L.x_off, L.width);
         int32_t start_x = start_x_of(t);
@@ -239,6 +268,20 @@ int collect_parallel_mixed_routes(const SystemPathData& data, const SysLayout& L
                          true};
         hub_route.end_y = mhy - mhh / 2;
     }
+    return n;
+}
+
+// HUB unit feeding another unit's head: no box, one plain route from the unit
+// to that nozzle, drawn like a heads-unit's own.
+int collect_shared_head_route(const SystemPathData& data, const SysLayout& L, int i,
+                              GlobalRoute* routes, int n) {
+    const int first_tool = data.unit_first_tool[i];
+    if (first_tool >= data.total_tools || n >= SystemPathData::MAX_TOOLS)
+        return n;
+    const int32_t unit_x = unit_stem_x(data, L, i);
+    const int32_t tool_x = calc_tool_x(first_tool, data.total_tools, L.x_off, L.width);
+    const int32_t dist = unit_x > tool_x ? (unit_x - tool_x) : (tool_x - unit_x);
+    routes[n++] = {i, first_tool, unit_x, L.entry_y, tool_x, L.tools_y, dist, false, false, 0};
     return n;
 }
 
@@ -564,6 +607,8 @@ void plan_multi_tool(const SystemPathData& data, const SysLayout& L, PathPlan& p
         const int topology = data.unit_topology[i];
         if (topology == TOPO_PARALLEL || topology == TOPO_MIXED)
             n = collect_parallel_mixed_routes(data, L, i, routes, n, boxes);
+        else if (feeds_another_units_head(data, i))
+            n = collect_shared_head_route(data, L, i, routes, n);
         else
             n = collect_hub_route(data, L, i, routes, n, boxes);
     }

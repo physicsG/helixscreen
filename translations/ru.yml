@@ -285,6 +285,10 @@ translations:
   Auto-Detect: Автоопределение
   Auto-Heat on Load: Автонагрев при загрузке
   Auto-detect: Автоопределение
+  Auto-dry: 'Автосушка'
+  Auto-dry off: 'Автосушка выключена'
+  Auto-dry on: 'Автосушка включена'
+  Auto-dry unchanged: 'Автосушка без изменений'
   Auto-install only works on local Moonraker: Автоустановка работает только с локальным
     Moonraker
   Auto-lock: Автоблокировка
@@ -818,6 +822,7 @@ translations:
   Could not skip {}: 'Не удалось пропустить {}'
   Could not start Bluetooth discovery: Не удалось запустить поиск Bluetooth
   Could not update filaments: Не удалось обновить филаменты
+  Could not update slot: 'Не удалось обновить слот'
   Could not verify Spoolman status. Moonraker may still be restarting.: Не удалось
     проверить статус Spoolman. Moonraker может ещё перезапускаться.
   Couldn't clear the printer's gate map: Не удалось очистить карту шлюзов принтера
@@ -968,6 +973,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Загрузка... {:.1f}/{:.1f} МБ
   Draw a ripple at each touch — helps diagnose offsets: Рисовать круг при каждом касании
     — помогает диагностировать смещения
+  Dries above %d%%, stops below %d%%: 'Сушит выше %d%%, останавливается ниже %d%%'
   Drive Cal: Кал. привода
   Drop shadow strength (0 = disabled): Интенсивность тени (0 = отключено)
   Dry Filament: Сушка филамента
@@ -1394,6 +1400,7 @@ translations:
   Focused: 'Сосредоточенный'
   Follow active tool: Следовать активному инструменту
   Follow graph screen: Следовать экрану графика
+  Follows unit %d: 'Следует за блоком %d'
   Force/weight sensors: 'Датчики силы/веса'
   Forget: Забыть
   Forget Network?: Забыть сеть?
@@ -2244,6 +2251,7 @@ translations:
   Open feeder: Открыть фидер
   Open frame: Открытая рама
 
+  Open in ACE: 'Открыть в ACE'
   Open motion controls for jogging: Управление перемещением осей
   Open the CFS unit and remove the broken filament from the slot: Откройте блок CFS и извлеките сломанный филамент из слота
   Open the slot editor when you load a new spool: 'Открывать редактор слота при установке новой катушки'
@@ -3547,6 +3555,7 @@ translations:
   Toolhead Sensor: Датчик печатающей головки
   Toolhead Style: Стиль печатающей головки
   Toolhead Y: Печатающая головка Y
+  Toolhead command failed: 'Команда инструментальной головки не выполнена'
   Toolhead jam: Замятие в печатающей головке
   Toolhead position unknown: Положение печатающей головки неизвестно
   Toolheads: Печатающие головки

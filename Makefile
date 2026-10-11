@@ -201,8 +201,22 @@ ifeq ($(PLATFORM_TARGET),yocto)
     CFLAGS += -std=c11 -Wall -Wextra -D_GNU_SOURCE -Wno-psabi
     CXXFLAGS += -std=c++17 -Wall -Wextra -Wno-psabi
 else
-    CFLAGS := -std=c11 -Wall -Wextra -O$(OPT) -g$(DBGLEVEL) -D_GNU_SOURCE -fno-omit-frame-pointer -fstack-protector-strong
-    CXXFLAGS := -std=c++17 -Wall -Wextra -O$(OPT) -g$(DBGLEVEL) -fno-omit-frame-pointer -fstack-protector-strong
+    # DWARF is emitted per translation unit with no cross-TU dedup, so every TU
+    # that includes Catch2, LVGL, nlohmann::json or spdlog carries its own copy
+    # of those type descriptions and .debug_info dwarfs the code it describes.
+    # -gz compresses the debug sections in place, shrinking objects and binaries
+    # so more of a build fits in ccache. It is orthogonal to DBGLEVEL, which
+    # picks how much DWARF is emitted, not how it is stored.
+    #
+    # -fdebug-types-section is not used: its per-type-unit overhead grows the
+    # object tree by more than the dedup saves at this TU count.
+    #
+    # Probed because this block also feeds the cross toolchains (pi, ad5m, cc1),
+    # where an unsupported flag would break the build outright.
+    DEBUG_SIZE_FLAGS := $(shell printf 'int main(){return 0;}' | \
+        $(CXX) -x c++ -gz -c -o /dev/null - >/dev/null 2>&1 && echo -gz)
+    CFLAGS := -std=c11 -Wall -Wextra -O$(OPT) -g$(DBGLEVEL) $(DEBUG_SIZE_FLAGS) -D_GNU_SOURCE -fno-omit-frame-pointer -fstack-protector-strong
+    CXXFLAGS := -std=c++17 -Wall -Wextra -O$(OPT) -g$(DBGLEVEL) $(DEBUG_SIZE_FLAGS) -fno-omit-frame-pointer -fstack-protector-strong
     ifneq ($(OPT),0)
         CFLAGS += -D_FORTIFY_SOURCE=2
         CXXFLAGS += -D_FORTIFY_SOURCE=2
@@ -689,6 +703,8 @@ else
     LIBHV_LIBS := $(LIBHV_LIB)
 endif
 
+
+
 # libhv generates include/hv headers during libhv-build. Track json.hpp so a
 # stale archive cannot be reused when generated headers are missing.
 ifneq ($(LIBHV_LIB),)
@@ -867,6 +883,12 @@ ifeq ($(YOCTO_BUILD),yes)
         LDFLAGS += -lssl -lcrypto
     endif
     LDFLAGS += $(TARGET_LDFLAGS)
+    # No -gz here on purpose. DEBUG_SIZE_FLAGS is defined only on the non-Yocto
+    # branch, and there it reaches the linker through CXXFLAGS (mk/rules.mk
+    # links both binaries with $(CXX) $(CXXFLAGS) ... $(LDFLAGS)), so the debug
+    # sections stay compressed in the linked output without a separate LDFLAGS
+    # entry. On this Yocto branch nothing is -gz-compressed to begin with.
+
     PLATFORM := Linux-yocto
     # No submodule wpa_client to depend on — wpa-supplicant recipe installs libwpa_client.
     WPA_DEPS :=
@@ -1032,6 +1054,22 @@ else ifeq ($(PLATFORM_TARGET),native)
 endif
 CXXFLAGS += $(ALSA_CXXFLAGS)
 LDFLAGS += $(ALSA_LIBS)
+
+# Link with mold when available. GNU ld spends ~97s on helix-screen and longer
+# on helix-tests, and that link IS the cost of an edit-one-file iteration —
+# compiling the changed TU takes about a second. mold is a drop-in: same inputs,
+# same output, gdb reads it identically.
+#
+# MUST live down here for the same reason ASAN's flags do — the per-platform
+# `LDFLAGS :=` composition above clobbers anything appended earlier. Probed by
+# actually linking rather than `which mold`, because the cross toolchains (pi,
+# ad5m, cc1) use a different g++ that may not accept -fuse-ld=mold, and a link
+# failure there is worse than a slow link.
+HELIX_USE_MOLD := $(shell printf 'int main(){return 0;}' | \
+    $(CXX) -x c++ -fuse-ld=mold -o /dev/null - >/dev/null 2>&1 && echo yes)
+ifeq ($(HELIX_USE_MOLD),yes)
+    LDFLAGS += -fuse-ld=mold
+endif
 
 # Re-apply AddressSanitizer linker flags AFTER the per-platform LDFLAGS
 # composition above (lines 580-694) — those use `LDFLAGS :=` which clobbers

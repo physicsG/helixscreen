@@ -63,7 +63,14 @@ class AmsContextMenu : public ContextMenu {
     using BackupEligibleFn =
         std::function<helix::printer::BackupEligibility(int slot, int candidate)>;
 
-    /// Init and publish the two XML subjects this menu's layout binds. Idempotent,
+    /// The spool number a slot's badge shows, which is not slot+1 once a unit
+    /// re-uses another's identity: on multiACE an ACE-fed head and the ACE bay
+    /// behind it share one number. Injected for the same reason as
+    /// BackupEligibleFn — always AmsBackend::spool_display_number() in
+    /// production, a parameter only so the builder stays testable.
+    using SlotDisplayNumberFn = std::function<int(int slot)>;
+
+    /// Init and publish the XML subjects this menu's layout binds. Idempotent,
     /// and called from the constructor, so production never needs it. Public for
     /// tests that build ams_context_menu.xml without a menu instance: the names
     /// must resolve before lv_xml_create(), or the state bindings are silently
@@ -87,7 +94,8 @@ class AmsContextMenu : public ContextMenu {
         SPOOLMAN,         ///< Assign Spoolman spool
         SCAN_QR,          ///< Scan QR code to assign spool
         PURGE,            ///< Purge the current filament through the nozzle
-        TOGGLE_BYPASS     ///< Engage or disengage bypass (external spool only)
+        TOGGLE_BYPASS,    ///< Engage or disengage bypass (external spool only)
+        OPEN_SOURCE_UNIT  ///< Jump to the unit that owns this slot's spool identity
     };
 
     using ActionCallback = std::function<void(MenuAction action, int slot_index)>;
@@ -99,9 +107,12 @@ class AmsContextMenu : public ContextMenu {
     AmsContextMenu(const AmsContextMenu&) = delete;
     AmsContextMenu& operator=(const AmsContextMenu&) = delete;
 
-    // Movable
-    AmsContextMenu(AmsContextMenu&& other) noexcept;
-    AmsContextMenu& operator=(AmsContextMenu&& other) noexcept;
+    // Non-movable. Every owner (AmsPanel, AmsOverviewPanel, the external-spool
+    // menu) holds this in a unique_ptr and nothing moves it; the move bodies
+    // existed only to hand per-instance subjects from one object to another,
+    // and the subjects are the class's now.
+    AmsContextMenu(AmsContextMenu&&) = delete;
+    AmsContextMenu& operator=(AmsContextMenu&&) = delete;
 
     /**
      * @brief Show context menu near a slot widget
@@ -164,19 +175,17 @@ class AmsContextMenu : public ContextMenu {
 
     // === Subjects for button enable/disable states ===
     //
-    // Static, like BufferStatusModal's, and for the same two reasons. The XML
-    // registry is keyed by name for the whole process, so per-instance storage
-    // cannot work here: three owners construct an AmsContextMenu (AmsPanel,
-    // AmsOverviewPanel, ExternalSpoolMenu) and all three publish the same two
-    // names, so the last registration wins and the first owner to be destroyed
-    // withdraws — or worse, silently outlives — a name the others still serve.
-    // Before this was static, a destroyed menu left "ams_slot_can_load" pointing
-    // into freed storage, and the next lv_xml_create() binding it wrote an
-    // observer through a reused allocation (nightly ASan, 2026-08-16).
+    // ONE set for the class, not one per instance. The XML binds these by fixed
+    // name, and three owners each construct their own menu (AmsPanel, the
+    // overview, the external-spool menu): per-instance subjects registered
+    // under the same names would leave the last registrant owning them, every
+    // other instance writing to subjects no card is bound to, and the registry
+    // pointing at reclaimed storage once an owner is destroyed. One menu is on
+    // screen at a time and the values are set in on_created() immediately
+    // before it is shown, so one shared set is exactly what the XML needs.
     //
-    // Sharing the values across the three owners is correct rather than merely
-    // tolerable: only one context menu is on screen at a time, and both values
-    // are set in on_created() immediately before the menu is shown.
+    // Torn down through StaticSubjectRegistry at shutdown, never in the
+    // destructor, for the same reason.
     static lv_subject_t slot_is_loaded_subject_; ///< 1 = loaded (Unload enabled), 0 = not loaded
     static lv_subject_t slot_can_load_subject_;  ///< 1 = has filament (Load enabled), 0 = empty
     /// 1 = Purge enabled. External-spool menu only; the lane menu has no Purge
@@ -201,7 +210,15 @@ class AmsContextMenu : public ContextMenu {
     /// disabled (busy, filament loaded, or a print blocks filament ops),
     /// 2 = enabled.
     static lv_subject_t slot_preload_subject_;
+    /// 1 = another unit owns this slot's filament identity (multiACE: an
+    /// ACE-fed U1 head). Bound in XML so the edit actions hide and the
+    /// "open the owner" action appears, without adding imperative visibility.
+    static lv_subject_t slot_source_external_subject_;
     static bool subjects_initialized_;
+    static void deinit_subjects();
+    /// Unit that owns this slot's identity, or -1. Held so OPEN_SOURCE_UNIT can
+    /// name it without re-querying a backend that may have changed.
+    int source_owner_unit_ = -1;
 
     // === Backend reference for dropdown operations ===
     AmsBackend* backend_ = nullptr;
@@ -244,6 +261,8 @@ class AmsContextMenu : public ContextMenu {
     void handle_purge();
     void handle_bypass_toggle();
     void handle_spoolman();
+    /// "Open in <unit>" — the slot's spool is described by another unit.
+    void handle_open_source();
     void handle_scan_qr();
     void handle_tool_changed();
     void handle_backup_changed();
@@ -258,6 +277,9 @@ class AmsContextMenu : public ContextMenu {
     /// always-eligible stub when there is no backend (matching the old code,
     /// which skipped every compatibility check in that case).
     BackupEligibleFn backend_eligible_fn() const;
+    /// backend_->spool_display_number() as a callable, or the plain 1-based
+    /// position with no backend.
+    SlotDisplayNumberFn backend_display_number_fn() const;
     /// The word this menu spells a position with. The backend the menu was
     /// shown for owns the answer; with none, the active printer's does.
     LaneNoun menu_lane_noun() const;
@@ -305,8 +327,11 @@ class AmsContextMenu : public ContextMenu {
     // @param item_index  The slot the menu is open on.
     // @param eligible    The backend's rule.
     // @return Newline-separated dropdown options, starting with "None".
+    // @param display_number  The 1-based number each candidate's badge shows;
+    //                        empty numbers candidates by position.
     static std::string build_backup_options_for(LaneNoun noun, const std::vector<int>& candidates,
-                                                int item_index, const BackupEligibleFn& eligible);
+                                                int item_index, const BackupEligibleFn& eligible,
+                                                const SlotDisplayNumberFn& display_number = {});
 
     // The backup dropdown's slots after "None", in order: every bay that
     // exists except the one the menu is open on. The option labels, the
@@ -331,6 +356,7 @@ class AmsContextMenu : public ContextMenu {
         UnloadMode unload_mode = UnloadMode::Unavailable;
         bool unload_enabled = false;
         bool can_load = false;
+        bool source_external = false; ///< slot_identity_owner_unit() names another unit
     };
 
     // Pure: the whole per-slot Load/Unload decision, from the backend's accessors.
@@ -400,8 +426,16 @@ class AmsContextMenu : public ContextMenu {
     // directions — offering what will be refused strands a runout-paused user
     // (bundle JX2FVRB9), and refusing what the backend accepts hides the
     // pause-then-swap recovery Klipper just told them to perform.
+    //
+    // `source_external` is slot_identity_owner_unit().has_value(): the position
+    // is fed from ANOTHER unit rather than holding a spool of its own. Load is
+    // meaningless there and is withdrawn outright — an ACE-fed U1 head is
+    // loaded with `ACE_LOAD_HEAD HEAD=n ACE=a SLOT=s`, which names a specific
+    // bay, so the choice belongs to the bay's own menu. Unload is unaffected:
+    // `ACE_UNLOAD_HEAD HEAD=n` needs no bay and is exactly what the head can do.
     static bool decide_can_load(bool system_busy, bool toolhead_unload,
-                                std::optional<bool> slot_has_filament, bool print_blocks_op);
+                                std::optional<bool> slot_has_filament, bool print_blocks_op,
+                                bool source_external = false);
 
     // Pure: whether the Unload button is offered for the open slot.
     //
@@ -440,6 +474,7 @@ class AmsContextMenu : public ContextMenu {
     static void on_purge_cb(lv_event_t* e);
     static void on_bypass_toggle_cb(lv_event_t* e);
     static void on_spoolman_cb(lv_event_t* e);
+    static void on_open_source_cb(lv_event_t* e);
     static void on_scan_qr_cb(lv_event_t* e);
     static void on_tool_changed_cb(lv_event_t* e);
     static void on_backup_changed_cb(lv_event_t* e);
@@ -456,10 +491,14 @@ struct SlotMenuHost {
     const char* log_tag = "[AMS]";
     std::function<lv_obj_t*()> path_canvas;
     std::function<AmsOperationSidebar*()> sidebar;
+    /// Show the unit that owns a slot's spool identity (OPEN_SOURCE_UNIT). Takes
+    /// the owning unit's index. Unset = the action does nothing.
+    std::function<void(int owner_unit)> open_source_unit;
 };
 
 /// Wire @p menu's action callback to the shared slot actions (LOAD, UNLOAD, EDIT,
-/// SPOOLMAN, SCAN_QR plus the backend-only ones) and show it at @p near_widget.
+/// SPOOLMAN, SCAN_QR, OPEN_SOURCE_UNIT plus the backend-only ones) and show it at
+/// @p near_widget.
 /// AmsPanel and AmsOverviewPanel both open slot menus through this.
 void open_slot_context_menu(AmsContextMenu& menu, const SlotMenuHost& host, int slot_index,
                             lv_obj_t* near_widget, lv_point_t click_pt);

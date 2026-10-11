@@ -75,8 +75,16 @@ struct SystemPathData {
     char unit_buffer_label[MAX_UNITS][8] = {};
 
     // Per-unit tool routing (mixed topology support)
-    int unit_tool_count[MAX_UNITS] = {};     // Tools per unit (BT=4, OpenAMS=1)
-    int unit_first_tool[MAX_UNITS] = {};     // First tool index for this unit
+    int unit_tool_count[MAX_UNITS] = {}; // Tools per unit (BT=4, OpenAMS=1)
+    int unit_first_tool[MAX_UNITS] = {}; // First tool index for this unit
+    /// Bit t = "this unit actually supplies physical tool first_tool + t".
+    /// Cleared for a tool this unit owns the NOZZLE of but does not feed (an
+    /// MMU-fed toolhead on a toolchanger), so the unit draws no supply line to
+    /// filament it is not supplying. Consulted only once SET: 0 is a real
+    /// answer, for a unit that feeds none of its nozzles, and must not read as
+    /// "never told".
+    uint32_t unit_tool_mask[MAX_UNITS] = {};
+    bool unit_tool_mask_set[MAX_UNITS] = {};
     int unit_topology[MAX_UNITS] = {};       // 0=LINEAR, 1=HUB, 2=PARALLEL, 3=MIXED
     bool unit_absent[MAX_UNITS] = {};        // Box not on the bus: column drawn empty
     int total_tools = 0;                     // Total tool count across all units
@@ -90,6 +98,11 @@ struct SystemPathData {
     char tool_label_prefix = 'T';
     char tool_labels[MAX_TOOLS][8] = {}; // Pre-formatted "<P>n" strings for deferred draw
     char current_tool_label[8] = {};     // Pre-formatted label for single-nozzle mode
+
+    /// Optional toolhead-tap callback. Unset leaves the canvas passive, which
+    /// is what every panel except the AMS overview wants.
+    void (*toolhead_callback)(int tool_index, void* user_data) = nullptr;
+    void* toolhead_user_data = nullptr;
 
     // Theme-derived colors, read on every draw
     lv_color_t color_idle;

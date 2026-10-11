@@ -3013,6 +3013,11 @@ REL_PRESET.snapmaker-u1 := snapmaker_u1
 # Scripts shipped in scripts/ beside the uninstaller.
 REL_SCRIPTS.snapmaker-u1 := scripts/snapmaker-u1-setup-autostart.sh
 
+# Executables shipped at the package root beside the installer. install-fork.sh
+# prefers an installer sitting next to it, so an unpacked archive installs from
+# the fork with no network.
+REL_ROOT_SCRIPTS.snapmaker-u1 := scripts/install-fork.sh
+
 # Closing-line suffix for packages that publish extra names.
 REL_NOTE.mips := (+ k1/ad5x transition aliases)
 
@@ -3068,6 +3073,7 @@ define release-package
 	$(if $(REL_PRESET.$(1)),@cp assets/config/presets/$(REL_PRESET.$(1)).json $(RELEASE_DIR)/helixscreen/config/settings.json && echo "  $(DIM)Included pre-configured config/settings.json for $(REL_LABEL.$(1))$(RESET)")
 	@cp $(INSTALLER_BUNDLE) $(RELEASE_DIR)/helixscreen/
 	@chmod +x $(RELEASE_DIR)/helixscreen/$(INSTALLER_FILENAME)
+	$(if $(REL_ROOT_SCRIPTS.$(1)),@cp $(REL_ROOT_SCRIPTS.$(1)) $(RELEASE_DIR)/helixscreen/ && chmod +x $(addprefix $(RELEASE_DIR)/helixscreen/,$(notdir $(REL_ROOT_SCRIPTS.$(1)))))
 	@mkdir -p $(RELEASE_DIR)/helixscreen/scripts
 	@cp $(UNINSTALLER_BUNDLE) $(RELEASE_DIR)/helixscreen/scripts/
 	@cp -r scripts/kiauh $(RELEASE_DIR)/helixscreen/scripts/

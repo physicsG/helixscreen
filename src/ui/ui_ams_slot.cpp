@@ -3,6 +3,7 @@
 
 #include "ui_ams_slot.h"
 
+#include "ui_ams_lane_bar.h"
 #include "ui_ams_lane_spool.h"
 #include "ui_fonts.h"
 #include "ui_observer_guard.h"
@@ -34,6 +35,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 
 using namespace helix;
@@ -92,6 +94,19 @@ struct AmsSlotData {
     // The lane spool graphic (spool, placeholder, error dot) renders itself
     // from the per-slot subjects; ams_slot only points it at a slot index.
     lv_obj_t* lane_spool = nullptr;
+
+    /// Bar row shown INSTEAD of the spool for a position fed from another unit.
+    /// An ACE-fed U1 head does not hold one spool — in head mode every bay of
+    /// its ACE feeds it — so a single spool graphic names whichever bay happens
+    /// to be seated and hides the other three. The bars are the same ones the
+    /// multi-filament overview draws on a unit card: one ams_lane_bar per bay.
+    lv_obj_t* source_bars = nullptr;
+    /// What source_bars was last built for: the feeding unit's first slot, its
+    /// bay count and the measured bar width. Each bar binds a global slot index
+    /// and repaints itself, so only a change here needs new bars.
+    int source_bars_first_slot = -1;
+    int source_bars_count = 0;
+    int32_t source_bars_width = 0;
 
     // Other UI elements
     lv_obj_t* material_label = nullptr;
@@ -223,6 +238,13 @@ static void cleanup_all_slot_data() {
 static void apply_material_label(AmsSlotData* data, const char* material) {
     if (!data || !data->material_label)
         return;
+    // A position drawn as its feeder's bays holds no single filament to name:
+    // the label would state whichever bay happened to be seated. Decided here,
+    // in the rule that owns this label, because it re-runs.
+    if (data->source_bars) {
+        lv_obj_add_flag(data->material_label, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
     const char* text = helix::ui::lane_material_text(data->last_lane_state, material);
     if (data->last_lane_state != helix::ui::LaneState::Empty && data->total_count > 4 &&
         std::strlen(text) > 4) {
@@ -407,6 +429,31 @@ static void apply_current_slot_highlight(AmsSlotData* data, int current_slot) {
     set_spool_glow(data,
                    is_active ? helix::ui::SpoolHighlight::Steady : helix::ui::SpoolHighlight::None);
 
+    // A slot fed from another unit is showing that unit's spool, not one of its
+    // own — on multiACE the U1's ACE-fed head. Mark it so the borrowed spool is
+    // legible as borrowed, which is also why its edit actions are missing from
+    // the slot menu.
+    //
+    // On `container`, the slot widget itself, so it frames the whole position
+    // rather than the spool area. Muted and thin so it reads as an annotation
+    // rather than competing with the active mark.
+    if (data->container) {
+        bool external = false;
+        if (auto* backend = AmsState::instance().get_backend(data->backend_index)) {
+            external = backend->slot_identity_owner_unit(data->slot_index).has_value();
+        }
+        if (external) {
+            lv_obj_set_style_border_color(data->container, theme_manager_get_color("text_muted"),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_opa(data->container, LV_OPA_60, LV_PART_MAIN);
+            lv_obj_set_style_border_width(data->container, 1, LV_PART_MAIN);
+            lv_obj_set_style_radius(data->container, 4, LV_PART_MAIN);
+        } else {
+            lv_obj_set_style_border_opa(data->container, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_width(data->container, 0, LV_PART_MAIN);
+        }
+    }
+
     spdlog::debug("[AmsSlot] Slot {} highlight active={} (from slot_active_loaded subject)",
                   data->slot_index, is_active);
 }
@@ -472,6 +519,15 @@ static void apply_tool_badge(AmsSlotData* data, int mapped_tool, bool is_overrid
         return;
     }
 
+    // A position drawn as its feeder's bays is not one tool's spool — it is the
+    // set the tool can draw from — so the tool letter belongs to the toolhead
+    // row below, not on top of the bars. Decided here, with the rest of this
+    // badge's visibility, because this rule re-runs on every refresh.
+    if (data->source_bars) {
+        lv_obj_add_flag(data->tool_badge_bg, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
     // Tool changers: badge is redundant with toolhead label below
     auto* backend = AmsState::instance().get_backend(data->backend_index);
     if (backend && backend->should_hide_slot_tool_badge()) {
@@ -506,6 +562,8 @@ static void apply_tool_badge(AmsSlotData* data, int mapped_tool, bool is_overrid
 /**
  * @brief Event handler for widget lifecycle (DELETE event for cleanup)
  */
+static void apply_source_bars(AmsSlotData* data);
+
 static void ams_slot_event_cb(lv_event_t* e) {
     lv_event_code_t code = lv_event_get_code(e);
 
@@ -520,6 +578,21 @@ static void ams_slot_event_cb(lv_event_t* e) {
     }
 }
 
+/// SIZE_CHANGED on the spool container (user_data = the slot widget). The
+/// source bars are sized off the container's computed width, which is 0 when
+/// the widget is first built (mid-XML-inflation) and only real once the
+/// container itself has been laid out -- so the hook sits on the container,
+/// whose coords are final when its own event fires, not on the slot widget,
+/// whose event runs before its children are re-laid-out. Only a position fed
+/// from another unit has bars to size; apply_source_bars() returns at once for
+/// every other slot.
+static void ams_slot_container_size_cb(lv_event_t* e) {
+    auto* obj = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
+    if (auto* d = get_slot_data(obj)) {
+        apply_source_bars(d);
+    }
+}
+
 // ============================================================================
 // Widget Creation (Internal)
 // ============================================================================
@@ -527,6 +600,122 @@ static void ams_slot_event_cb(lv_event_t* e) {
  * @brief Setup observers for a given slot index
  * Uses observer factory pattern for type-safe lambda observers
  */
+/**
+ * @brief Draw the feeding unit's bays as bars, instead of one spool.
+ *
+ * A position fed from another unit is not a spool position — it is a view of
+ * several. On a U1 in head mode all four bays of the bound ACE feed the one
+ * ACE-fed head, so a single spool graphic would show whichever bay happened to
+ * be seated and hide the other three; the badge already reads as the range.
+ *
+ * The bars are ams_lane_bar widgets, the ones the multi-filament overview's
+ * unit cards use: each binds one bay's per-slot subjects and repaints itself,
+ * so a bay's colour, fill, active mark and error reach this position without a
+ * rebuild. Only geometry rebuilds them: the feeding unit, its bay count, or the
+ * measured bar width.
+ *
+ * Safe to call repeatedly, and called from three places: setup_slot_observers()
+ * once the slot index is known, ui_ams_slot_refresh() because which unit feeds
+ * a position can change, and the spool container's SIZE_CHANGED because the
+ * first call lands mid-XML-inflation, when the container has no width yet. A
+ * rebuild goes through safe_clean_children(): the refresh arrives inside a
+ * queued batch, where a synchronous lv_obj_clean() corrupts LVGL's event list
+ * (#776).
+ *
+ * A slot that holds its own spool keeps it; one that stopped being fed from
+ * elsewhere gets its spool, label and badge back.
+ */
+static void apply_source_bars(AmsSlotData* data) {
+    if (!data || !data->spool_container) {
+        return;
+    }
+    auto* backend = AmsState::instance().get_backend(data->backend_index);
+    const auto owner = backend ? backend->slot_identity_owner_unit(data->slot_index) : std::nullopt;
+    const AmsSystemInfo info = owner ? backend->get_system_info() : AmsSystemInfo{};
+    const bool fed_elsewhere = owner && *owner >= 0 &&
+                               *owner < static_cast<int>(info.units.size()) &&
+                               !info.units[static_cast<size_t>(*owner)].slots.empty();
+
+    if (!fed_elsewhere) {
+        if (data->source_bars) {
+            // Deferred for the same reason the rebuild below is.
+            lv_obj_delete_async(data->source_bars);
+            data->source_bars = nullptr;
+            data->source_bars_first_slot = -1;
+            data->source_bars_count = 0;
+            data->source_bars_width = 0;
+            if (data->lane_spool) {
+                lv_obj_remove_flag(data->lane_spool, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (data->material_label) {
+                lv_obj_remove_flag(data->material_label, LV_OBJ_FLAG_HIDDEN);
+            }
+            refresh_slot_material_label(data);
+            const SlotInfo slot = backend ? backend->get_slot_info(data->slot_index) : SlotInfo{};
+            apply_tool_badge(data, slot.mapped_tool, slot.tool_mapping_override);
+        }
+        return;
+    }
+
+    const auto& unit = info.units[static_cast<size_t>(*owner)];
+    const int bays = static_cast<int>(unit.slots.size());
+
+    // The computed width, not the styled one, and only once there IS one.
+    // Before the first layout pass this reads 0, and calc_bar_width() would
+    // clamp every bar to MINI_BAR_MIN_WIDTH_PX. SIZE_CHANGED brings this back
+    // once the container has been laid out.
+    lv_obj_update_layout(data->spool_container);
+    const int32_t box = lv_obj_get_width(data->spool_container);
+    if (box <= 0) {
+        return;
+    }
+    const int32_t gap = theme_manager_get_spacing("space_xxs");
+    const int32_t bar_w = ams_draw::calc_bar_width(box, bays, gap, ams_draw::MINI_BAR_MIN_WIDTH_PX,
+                                                   ams_draw::MINI_BAR_MAX_WIDTH_PX);
+
+    const bool created = data->source_bars == nullptr;
+    if (created) {
+        data->source_bars = lv_obj_create(data->spool_container);
+        lv_obj_remove_style_all(data->source_bars);
+        lv_obj_set_size(data->source_bars, LV_PCT(100), LV_PCT(100));
+        lv_obj_set_flex_flow(data->source_bars, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(data->source_bars, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(data->source_bars, gap, LV_PART_MAIN);
+        lv_obj_remove_flag(data->source_bars, LV_OBJ_FLAG_SCROLLABLE);
+        // Taps belong to the head's menu, so the bars must not swallow them.
+        lv_obj_remove_flag(data->source_bars, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(data->source_bars, LV_OBJ_FLAG_EVENT_BUBBLE);
+    }
+
+    if (created || data->source_bars_first_slot != unit.first_slot_global_index ||
+        data->source_bars_count != bays || data->source_bars_width != bar_w) {
+        if (!created) {
+            helix::ui::safe_clean_children(data->source_bars);
+        }
+        helix::ui::ams_lane_bar_create_range(data->source_bars, unit.first_slot_global_index, bays,
+                                             bar_w, (box * 3) / 4);
+        data->source_bars_first_slot = unit.first_slot_global_index;
+        data->source_bars_count = bays;
+        data->source_bars_width = bar_w;
+    }
+
+    if (created) {
+        // The spool and the bars are alternatives, never both. The lane spool
+        // manages its own children from the lane_state subject and never its
+        // root's visibility, so hiding the root holds.
+        if (data->lane_spool) {
+            lv_obj_add_flag(data->lane_spool, LV_OBJ_FLAG_HIDDEN);
+        }
+        // The label and tool-badge rules read source_bars and may have run
+        // for this slot before the bars existed.
+        refresh_slot_material_label(data);
+        if (data->tool_badge_bg) {
+            lv_obj_add_flag(data->tool_badge_bg, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
 static void setup_slot_observers(AmsSlotData* data) {
     if (data->slot_index < 0 || data->slot_index >= AmsState::MAX_SLOTS) {
         spdlog::warn("[AmsSlot] Invalid slot index {}, skipping observers", data->slot_index);
@@ -681,12 +870,27 @@ static void setup_slot_observers(AmsSlotData* data) {
             state.get_subjects_lifetime());
     }
 
-    // Update slot badge with 1-based display number
+    // Update slot badge with its 1-based SPOOL number, which is not the global
+    // index: the index is dense over every addressable slot, the label counts
+    // spools. They diverge when one slot only views another's spool — a U1 head
+    // fed from an ACE bay — and numbering by index there labelled seven spools
+    // 1-8. Identical to slot_index + 1 on every backend where each slot owns
+    // what it holds.
     if (data->slot_badge) {
-        char badge_text[16];
-        snprintf(badge_text, sizeof(badge_text), "%d", helix::ui::lane_number(data->slot_index));
-        lv_label_set_text(data->slot_badge, badge_text);
+        auto* badge_backend = AmsState::instance().get_backend(data->backend_index);
+        // A range ("4-7") when the position is fed by several of another unit's
+        // bays; the badge is width="content" over a min-width, so it widens into
+        // a pill on its own.
+        const std::string label = badge_backend
+                                      ? badge_backend->spool_display_label(data->slot_index)
+                                      : helix::ui::lane_number_text(data->slot_index);
+        lv_label_set_text(data->slot_badge, label.c_str());
     }
+
+    // A position fed from another unit shows that unit's bays instead of one
+    // spool. Here rather than at create time: slot_index is only set after the
+    // widget is built, so the backend cannot be asked about it any earlier.
+    apply_source_bars(data);
 
     // Trigger initial updates from current subject values. lane_state applies
     // BEFORE material so the label rule reads a current classification on the
@@ -784,6 +988,10 @@ static void* ams_slot_xml_create(lv_xml_parser_state_t* state, const char** attr
     // Register for cleanup
     register_slot_data(obj, data_ptr.release());
     lv_obj_add_event_cb(obj, ams_slot_event_cb, LV_EVENT_DELETE, nullptr);
+    // The registry, not the raw pointer, resolves obj on the way back in (see
+    // ams_slot_container_size_cb), so a deleted slot answers nullptr.
+    lv_obj_add_event_cb(data->spool_container, ams_slot_container_size_cb, LV_EVENT_SIZE_CHANGED,
+                        obj);
 
     // Apply responsive slot width
     int32_t space_lg = theme_manager_get_spacing("space_lg");
@@ -866,6 +1074,8 @@ void ui_ams_slot_register(void) {
     // The view embeds <ams_lane_spool>; it must be registered before the view
     // is instantiated.
     ui_ams_lane_spool_register();
+    // A position fed from another unit draws that unit's bays as <ams_lane_bar>s.
+    ui_ams_lane_bar_register();
 
     // Register the XML component first (defines the structural template)
     lv_xml_register_component_from_file(
@@ -948,6 +1158,9 @@ void ui_ams_slot_refresh(lv_obj_t* obj) {
         apply_tool_badge(data, slot.mapped_tool, slot.tool_mapping_override);
         apply_lane_humidity(data, backend);
     }
+    // Which unit feeds a position, and how many bays it has, can change under
+    // it; this is the per-slot hook the panel runs on every slots_version bump.
+    apply_source_bars(data);
 
     spdlog::trace("[AmsSlot] Refreshed slot {}", data->slot_index);
 }

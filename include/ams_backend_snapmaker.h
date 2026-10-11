@@ -152,6 +152,19 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
         // firmware sequences per-extruder AUTO_FEEDING itself. Gates the batch
         // Load/Unload affordance in the UI.
         t.supports_batch_filament_ops = true;
+        // The four heads are independent toolheads, each drawn and labelled
+        // below its slot, so a "T3" badge on the spool repeats what the
+        // toolhead already says.
+        t.should_hide_slot_tool_badge = true;
+        // `print_task_config` carries filament_type and filament_vendor per
+        // head, so the printer states what is loaded even though it stores no
+        // Spoolman id (has_firmware_spool_persistence stays false).
+        t.has_firmware_filament_identity = true;
+        // `PARK_EXTRUDER` returns the mounted head to its dock and leaves the
+        // filament where it is. It is firmware-native and ships with no
+        // description, so it does not appear in `gcode/help`; the machine's
+        // own `print_end` macro calls it bare and parameterless.
+        t.supports_toolhead_park = true;
         return t;
     }();
     [[nodiscard]] BackendTraits traits() const override {
@@ -228,6 +241,7 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     AmsError do_unload_filament(int slot_index) override;
     AmsError do_select_slot(int slot_index) override;
     AmsError do_change_tool(int tool_number) override;
+    AmsError do_park_toolhead() override;
 
     /// Batch load/unload as ONE AUTO_FEEDING script. The firmware serializes
     /// channels itself (FEED_AUTO's process-wide channel_active gate) and
@@ -459,12 +473,61 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     SlotInfo* cached_slot_locked(int slot_index) override;
     [[nodiscard]] std::optional<AmsAction> step_action_locked() const override;
 
+    /// The U1's fixed head count. Protected because a backend that adds units
+    /// beside the four heads derives from this one and indexes the same heads.
+    static constexpr int NUM_TOOLS = 4;
+
+    /// Is `preload_finish` the LAST channel_state an unload of head @p head
+    /// will produce?
+    ///
+    /// On a stock feeder head it is not: an unload rests at preload_finish
+    /// (lane staged in the buffer) while the nozzle is still heating, and only
+    /// `unload_finish` ends it. A head whose retract is performed by hardware
+    /// outside the feeder never reports `unload_finish`: its channel walks
+    /// unload_picking -> unload_heating -> unload_doing -> preload_finish and
+    /// stops, so the action would stay UNLOADING and every slot would read
+    /// busy.
+    ///
+    /// @warning Called with mutex_ HELD, from inside the channel_state parse. An
+    /// override must read state directly and must not call a public accessor
+    /// that locks: mutex_ is not recursive, and the parse runs on the main
+    /// thread.
+    [[nodiscard]] virtual bool preload_finish_ends_unload(int head) const {
+        (void)head;
+        return false;
+    }
+
+    /// Is the unload head @p head just finished only the first half of an
+    /// operation whose load half is already queued?
+    ///
+    /// True holds the action where it is across the boundary: resolving to
+    /// IDLE there hides the step bar, releases the operation and arms the
+    /// post-op nozzle cooldown while the load half still needs the heat.
+    ///
+    /// @warning Called with mutex_ HELD; see preload_finish_ends_unload().
+    [[nodiscard]] virtual bool unload_continues_into_load(int head) const {
+        (void)head;
+        return false;
+    }
+
+    /// The step-bar index to publish for head @p head reporting @p info.
+    ///
+    /// The default is the classifier's per-direction index, which is the
+    /// position in get_operation_step_model()'s load or unload list. A subclass
+    /// whose step model lays both directions on one bar maps it to a position
+    /// on that bar.
+    ///
+    /// @warning Called with mutex_ HELD; see preload_finish_ends_unload().
+    [[nodiscard]] virtual int step_phase_locked(int head,
+                                                const snapmaker::ChannelStateInfo& info) const {
+        (void)head;
+        return info.phase;
+    }
+
   private:
     friend class SnapmakerTestAccess;
     friend class SnapmakerRealtimeTestAccess;
     friend class RunoutScopeTestAccess;
-
-    static constexpr int NUM_TOOLS = 4;
 
     /// What one status frame decides, collected under mutex_ and acted on by
     /// dispatch_effects() after it is released, plus the frame-local values the
@@ -491,6 +554,14 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
         std::array<helix::ams::SpoolEvidence, NUM_TOOLS> observed_evidence{};
         /// The head whose channel reported an in-progress state this frame.
         int in_progress_head = -1;
+        /// The step-bar index this frame elects: the first channel reporting
+        /// an active step wins, and -1 stands only when no channel reported
+        /// one. A full query carries all four channels, and the idle ones that
+        /// follow the operating head must not blank its step.
+        int step_phase = -1;
+        /// A channel carried a channel_state this frame, so step_phase is an
+        /// answer rather than silence.
+        bool step_phase_seen = false;
         /// The batch macro reported doing=false and retired the active plan.
         bool batch_retired = false;
     };

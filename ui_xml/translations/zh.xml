@@ -265,6 +265,10 @@
   <translation tag="Auto-Detect" zh="自动检测"/>
   <translation tag="Auto-Heat on Load" zh="加载时自动加热"/>
   <translation tag="Auto-detect" zh="自动检测"/>
+  <translation tag="Auto-dry" zh="自动烘干"/>
+  <translation tag="Auto-dry off" zh="自动烘干已关闭"/>
+  <translation tag="Auto-dry on" zh="自动烘干已开启"/>
+  <translation tag="Auto-dry unchanged" zh="自动烘干未更改"/>
   <translation tag="Auto-install only works on local Moonraker" zh="自动安装仅适用于本地 Moonraker"/>
   <translation tag="Auto-lock" zh="自动锁定"/>
   <translation tag="Auto-poll for weight updates" zh="自动轮询重量更新"/>
@@ -740,6 +744,7 @@
   <translation tag="Could not skip {}" zh="无法跳过 {}"/>
   <translation tag="Could not start Bluetooth discovery" zh="无法启动蓝牙发现"/>
   <translation tag="Could not update filaments" zh="无法更新耗材"/>
+  <translation tag="Could not update slot" zh="无法更新槽位"/>
   <translation tag="Could not verify Spoolman status. Moonraker may still be restarting." zh="无法验证 Spoolman 状态。Moonraker 可能仍在重启中。"/>
   <translation tag="Couldn&apos;t clear the printer&apos;s gate map" zh="无法清空打印机的通道映射"/>
   <translation tag="Couldn&apos;t save the material name" zh="无法保存材料名称"/>
@@ -885,6 +890,7 @@
   <translation tag="Downloading..." zh="下载中..."/>
   <translation tag="Downloading... {:.1f}/{:.1f} MB" zh="下载中... {:.1f}/{:.1f} MB"/>
   <translation tag="Draw a ripple at each touch — helps diagnose offsets" zh="在每次触摸时绘制涟漪 — 有助于诊断偏移"/>
+  <translation tag="Dries above %d%%, stops below %d%%" zh="高于 %d%% 时烘干，低于 %d%% 时停止"/>
   <translation tag="Drive Cal" zh="驱动校准"/>
   <translation tag="Drop shadow strength (0 = disabled)" zh="阴影强度（0 = 禁用）"/>
   <translation tag="Dry Filament" zh="烘干耗材"/>
@@ -1278,6 +1284,7 @@
   <translation tag="Focused" zh="专注"/>
   <translation tag="Follow active tool" zh="跟随当前工具"/>
   <translation tag="Follow graph screen" zh="跟随图表屏幕"/>
+  <translation tag="Follows unit %d" zh="跟随单元 %d"/>
   <translation tag="Force/weight sensors" zh="力/重量传感器"/>
   <translation tag="Forget" zh="忘记"/>
   <translation tag="Forget Network?" zh="忘记网络？"/>
@@ -2051,6 +2058,7 @@
   <translation tag="Open feeder" zh="打开送料器"/>
   <translation tag="Open feeder macro" zh="打开送料器宏"/>
   <translation tag="Open frame" zh="开放式机架"/>
+  <translation tag="Open in ACE" zh="在 ACE 中打开"/>
   <translation tag="Open motion controls for jogging" zh="打开手动移动控制"/>
   <translation tag="Open the CFS unit and remove the broken filament from the slot" zh="请打开 CFS 单元并从槽位中取出断裂的耗材"/>
   <translation tag="Open the slot editor when you load a new spool" zh="装入新料盘时打开槽位编辑器"/>
@@ -3189,6 +3197,7 @@
   <translation tag="Toolhead Sensor" zh="工具头传感器"/>
   <translation tag="Toolhead Style" zh="工具头样式"/>
   <translation tag="Toolhead Y" zh="工具头 Y"/>
+  <translation tag="Toolhead command failed" zh="工具头命令失败"/>
   <translation tag="Toolhead jam" zh="工具头堵塞"/>
   <translation tag="Toolhead position unknown" zh="工具头位置未知"/>
   <translation tag="Toolheads" zh="工具头"/>

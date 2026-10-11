@@ -141,6 +141,7 @@ bool backend_owns_runout_surface(helix::AmsType type) {
     case helix::AmsType::OPENAMS: // no error hook
     case helix::AmsType::TOOL_CHANGER:
     case helix::AmsType::SNAPMAKER:
+    case helix::AmsType::MULTIACE: // inherits Snapmaker's handling; no classify_error()
     case helix::AmsType::NONE:
         return false;
     }
@@ -166,6 +167,7 @@ bool backend_owns_runout_during_job(helix::AmsType type) {
     case helix::AmsType::OPENAMS:  // no error hook: the toast is the only runout signal
     case helix::AmsType::TOOL_CHANGER:
     case helix::AmsType::SNAPMAKER:
+    case helix::AmsType::MULTIACE: // inherits Snapmaker's handling
     case helix::AmsType::NONE:
         return false;
     }

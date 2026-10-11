@@ -291,6 +291,10 @@ translations:
   Auto-Detect: Rilevamento auto
   Auto-Heat on Load: Riscaldamento automatico al caricamento
   Auto-detect: Rilevamento auto
+  Auto-dry: 'Essiccazione automatica'
+  Auto-dry off: 'Essiccazione automatica disattivata'
+  Auto-dry on: 'Essiccazione automatica attivata'
+  Auto-dry unchanged: 'Essiccazione automatica invariata'
   Auto-install only works on local Moonraker: L'installazione automatica funziona
     solo su Moonraker locale
   Auto-lock: Blocco automatico
@@ -826,6 +830,7 @@ translations:
   Could not skip {}: 'Impossibile saltare {}'
   Could not start Bluetooth discovery: Impossibile avviare la ricerca Bluetooth
   Could not update filaments: Impossibile aggiornare i filamenti
+  Could not update slot: 'Impossibile aggiornare lo slot'
   Could not verify Spoolman status. Moonraker may still be restarting.: Impossibile
     verificare lo stato di Spoolman. Moonraker potrebbe essere ancora in riavvio.
   Couldn't clear the printer's gate map: Impossibile svuotare la mappa dei gate della stampante
@@ -978,6 +983,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Download in corso... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: Disegna un'onda a ogni tocco
     — aiuta a diagnosticare gli scostamenti
+  Dries above %d%%, stops below %d%%: 'Asciuga sopra il %d%%, si ferma sotto il %d%%'
   Drive Cal: Cal. drive
   Drop shadow strength (0 = disabled): Intensità ombra (0 = disabilitata)
   Dry Filament: Essicca filamento
@@ -1408,6 +1414,7 @@ translations:
   Focused: 'Concentrato'
   Follow active tool: Segui strumento attivo
   Follow graph screen: Segui schermata grafico
+  Follows unit %d: 'Segue l’unità %d'
   Force/weight sensors: 'Sensori di forza/peso'
   Forget: Dimentica
   Forget Network?: Dimenticare la rete?
@@ -2264,6 +2271,7 @@ translations:
   Open feeder: Apri alimentatore
   Open frame: Telaio aperto
 
+  Open in ACE: 'Apri in ACE'
   Open motion controls for jogging: Apri i controlli di movimento
   Open the CFS unit and remove the broken filament from the slot: Aprire l'unità CFS e rimuovere il filamento spezzato dallo slot
   Open the slot editor when you load a new spool: 'Apri l''editor dello slot quando carichi una nuova bobina'
@@ -3586,6 +3594,7 @@ translations:
   Toolhead Sensor: Sensore testina
   Toolhead Style: Stile testina
   Toolhead Y: Testina Y
+  Toolhead command failed: 'Comando della testina non riuscito'
   Toolhead jam: Inceppamento testina
   Toolhead position unknown: Posizione della testina sconosciuta
   Toolheads: Testine

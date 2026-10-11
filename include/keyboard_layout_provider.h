@@ -22,8 +22,9 @@
 enum keyboard_layout_mode_t {
     KEYBOARD_LAYOUT_ALPHA_LC,        ///< Lowercase alphabet
     KEYBOARD_LAYOUT_ALPHA_UC,        ///< Uppercase alphabet
-    KEYBOARD_LAYOUT_NUMBERS_SYMBOLS, ///< Numbers and symbols
-    KEYBOARD_LAYOUT_ALT_SYMBOLS      ///< Alternative symbols (#+= mode)
+    KEYBOARD_LAYOUT_NUMBERS_SYMBOLS, ///< Numbers and symbols (the ?123 page)
+    KEYBOARD_LAYOUT_ALT_SYMBOLS,     ///< Alternative symbols (#+= mode)
+    KEYBOARD_LAYOUT_NUMERIC          ///< Digits only — for keyboard_hint="numeric" fields
 };
 
 /**

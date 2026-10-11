@@ -1385,8 +1385,14 @@ void AmsEditOverlay::update_ui() {
         snprintf(slot_indicator_buf_, sizeof(slot_indicator_buf_), "%s",
                  lv_tr("External Filament"));
     } else {
+        // Named as the slot's badge is: the two differ from the plain position
+        // once one slot views another's spool, and an editor titled with a
+        // number its badge does not show reads as the wrong spool's.
+        const helix::AmsBackend* label_backend = helix::AmsState::instance().get_backend();
         snprintf(slot_indicator_buf_, sizeof(slot_indicator_buf_), lv_tr("%s Filament"),
-                 helix::ui::lane_label(helix::ui::active_lane_noun(), slot_index_).c_str());
+                 (label_backend ? helix::ui::backend_lane_label(*label_backend, slot_index_)
+                                : helix::ui::lane_label(helix::ui::active_lane_noun(), slot_index_))
+                     .c_str());
     }
     lv_subject_copy_string(&slot_indicator_subject_, slot_indicator_buf_);
 

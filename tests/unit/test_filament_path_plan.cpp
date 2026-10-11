@@ -1058,6 +1058,9 @@ TEST_CASE("FilamentPath plan: the mounted PARALLEL tool is one active stroke",
           "[filament-path][plan][parallel]") {
     auto d = make_data(helix::PathTopology::PARALLEL);
     load_active(*d, 2, PathSegment::NOZZLE);
+    // On PARALLEL each tool answers for its own path, so the mounted tool
+    // carries per-slot filament too: the aggregate refines it, never creates it.
+    d->slot_filament_states[2] = {PathSegment::NOZZLE, SLOT_COLORS[2]};
     d->slot_filament_states[0] = {PathSegment::TOOLHEAD, SLOT_COLORS[0]};
     const PathPlan& plan = parallel_plan(*d);
     const float sensor_y = 198;
@@ -1152,6 +1155,7 @@ TEST_CASE("FilamentPath plan: PARALLEL and MIXED show an error on the mounted la
     SECTION("PARALLEL") {
         auto d = make_data(helix::PathTopology::PARALLEL);
         load_active(*d, 1, PathSegment::NOZZLE);
+        d->slot_filament_states[1] = {PathSegment::NOZZLE, SLOT_COLORS[1]};
         d->error_segment = static_cast<int>(PathSegment::NOZZLE);
         const PathPlan& plan = parallel_plan(*d);
         const Route& r = plan.routes[1];

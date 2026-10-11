@@ -12,6 +12,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <climits>
 #include <cstdlib>
 
@@ -347,6 +348,12 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
                              name);
             }
         }
+        // multiACE ships these two extras alongside its `ace` object and the
+        // Anycubic stacks have no equivalent, so either one is a positive
+        // multiACE marker. Its own installer always installs both.
+        else if (name == "ace_bg_swap" || name == "ace_tipform") {
+            has_multiace_markers_ = true;
+        }
         // MMU encoder discovery (Happy Hare)
         else if (name.rfind("mmu_encoder ", 0) == 0) {
             std::string encoder_name = name.substr(12); // Remove "mmu_encoder " prefix
@@ -673,24 +680,38 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
         }
     }
 
-    // multiACE hangs ACE Pro units off a Snapmaker U1's four toolheads and
-    // registers a plain `ace` object, so it matches ACE detection above and
-    // outranks the U1 fallback below. Its slots live per unit under
-    // `aces[]`, not in the top-level `slots` array AmsBackendAce requires,
-    // so an ACE backend would attach and read nothing while the Snapmaker
-    // backend that drives those toolheads stayed suppressed. objects.list
-    // carries names without status, so the discriminator is co-presence:
-    // filament_detect is published by U1 firmware alone, and no ACE stack
-    // this chain matches runs on an unmodded U1. Yielding the printer back
-    // costs the ACE-specific affordances and keeps filament management
-    // (prestonbrown/helixscreen#1426). The object names stay recorded: the
-    // hardware really does carry them, and nothing subscribes them once the
-    // type is no longer ACE.
+    // Two stacks register a Klipper object named exactly `ace`: the Anycubic
+    // community drivers (ValgACE/BunnyACE/DuckACE), a real ACE hub, and
+    // decay71/multiACE, which hangs 1-4 ACE units off a Snapmaker U1's four
+    // toolheads. multiACE publishes its slots per unit under `aces[]`, not in
+    // the top-level `slots` array AmsBackendAce requires, so an ACE backend
+    // would attach and read nothing. objects.list carries names without
+    // status, so the discriminator is co-presence: either multiACE marker
+    // object, or filament_detect, which U1 firmware alone publishes and no
+    // Anycubic printer has. AmsBackendMultiAce derives from the Snapmaker
+    // backend, so the four heads keep their native handling and the ACE units
+    // are added beside them.
+    const bool has_bare_ace_object = std::find(ace_object_names_.begin(), ace_object_names_.end(),
+                                               "ace") != ace_object_names_.end();
+    if (has_mmu_ && mmu_type_ == AmsType::ACE && has_bare_ace_object &&
+        (has_multiace_markers_ || has_snapmaker_)) {
+        mmu_type_ = AmsType::MULTIACE;
+        spdlog::info("[PrinterDiscovery] Detected multiACE (markers={}, snapmaker={}): U1 heads "
+                     "plus ACE units",
+                     has_multiace_markers_, has_snapmaker_);
+    }
+
+    // Any other ACE object beside filament_detect is an ACE stack on a U1 that
+    // none of the ACE backends can read. Yielding the printer back to the
+    // Snapmaker backend costs the ACE-specific affordances and keeps filament
+    // management (prestonbrown/helixscreen#1426). The object names stay
+    // recorded: the hardware really does carry them, and nothing subscribes
+    // them once the type is no longer ACE.
     if (has_mmu_ && mmu_type_ == AmsType::ACE && has_snapmaker_) {
         has_mmu_ = false;
-        spdlog::info("[PrinterDiscovery] ACE object alongside filament_detect: multiACE on a "
-                     "Snapmaker U1. Its slot shape is unreadable, so the Snapmaker backend "
-                     "keeps the printer.");
+        spdlog::info("[PrinterDiscovery] ACE object alongside filament_detect on a Snapmaker "
+                     "U1. Its slot shape is unreadable, so the Snapmaker backend keeps the "
+                     "printer.");
     }
 
     // PAXX's AFC-Lite is a status-only stub that impersonates AFC so Fluidd
@@ -770,6 +791,11 @@ void PrinterDiscovery::register_detected_ams_systems() {
         } else if (mmu_type_ == AmsType::OPENAMS) {
             // i18n: do not translate - product name
             detected_ams_systems_.push_back({AmsType::OPENAMS, "OpenAMS"});
+        } else if (mmu_type_ == AmsType::MULTIACE) {
+            // multiACE claims has_mmu_, which skips the has_snapmaker_ fallback
+            // below, so without this arm no system is registered at all.
+            // i18n: do not translate - product name
+            detected_ams_systems_.push_back({AmsType::MULTIACE, "multiACE"});
         }
     } else if (has_snapmaker_) {
         // Native Snapmaker filament system (no aftermarket MMU)
@@ -996,6 +1022,7 @@ void PrinterDiscovery::clear() {
     has_heater_bed_ = false;
     has_mmu_ = false;
     has_openams_manager_ = false;
+    has_multiace_markers_ = false;
     has_snapmaker_ = false;
     has_afc_lite_ = false;
     has_zmod_afclite_ = false;

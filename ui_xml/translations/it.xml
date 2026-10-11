@@ -265,6 +265,10 @@
   <translation tag="Auto-Detect" it="Rilevamento auto"/>
   <translation tag="Auto-Heat on Load" it="Riscaldamento automatico al caricamento"/>
   <translation tag="Auto-detect" it="Rilevamento auto"/>
+  <translation tag="Auto-dry" it="Essiccazione automatica"/>
+  <translation tag="Auto-dry off" it="Essiccazione automatica disattivata"/>
+  <translation tag="Auto-dry on" it="Essiccazione automatica attivata"/>
+  <translation tag="Auto-dry unchanged" it="Essiccazione automatica invariata"/>
   <translation tag="Auto-install only works on local Moonraker" it="L&apos;installazione automatica funziona solo su Moonraker locale"/>
   <translation tag="Auto-lock" it="Blocco automatico"/>
   <translation tag="Auto-poll for weight updates" it="Aggiornamento peso automatico"/>
@@ -740,6 +744,7 @@
   <translation tag="Could not skip {}" it="Impossibile saltare {}"/>
   <translation tag="Could not start Bluetooth discovery" it="Impossibile avviare la ricerca Bluetooth"/>
   <translation tag="Could not update filaments" it="Impossibile aggiornare i filamenti"/>
+  <translation tag="Could not update slot" it="Impossibile aggiornare lo slot"/>
   <translation tag="Could not verify Spoolman status. Moonraker may still be restarting." it="Impossibile verificare lo stato di Spoolman. Moonraker potrebbe essere ancora in riavvio."/>
   <translation tag="Couldn&apos;t clear the printer&apos;s gate map" it="Impossibile svuotare la mappa dei gate della stampante"/>
   <translation tag="Couldn&apos;t save the material name" it="Impossibile salvare il nome del materiale"/>
@@ -885,6 +890,7 @@
   <translation tag="Downloading..." it="Download in corso..."/>
   <translation tag="Downloading... {:.1f}/{:.1f} MB" it="Download in corso... {:.1f}/{:.1f} MB"/>
   <translation tag="Draw a ripple at each touch — helps diagnose offsets" it="Disegna un&apos;onda a ogni tocco — aiuta a diagnosticare gli scostamenti"/>
+  <translation tag="Dries above %d%%, stops below %d%%" it="Asciuga sopra il %d%%, si ferma sotto il %d%%"/>
   <translation tag="Drive Cal" it="Cal. drive"/>
   <translation tag="Drop shadow strength (0 = disabled)" it="Intensità ombra (0 = disabilitata)"/>
   <translation tag="Dry Filament" it="Essicca filamento"/>
@@ -1278,6 +1284,7 @@
   <translation tag="Focused" it="Concentrato"/>
   <translation tag="Follow active tool" it="Segui strumento attivo"/>
   <translation tag="Follow graph screen" it="Segui schermata grafico"/>
+  <translation tag="Follows unit %d" it="Segue l’unità %d"/>
   <translation tag="Force/weight sensors" it="Sensori di forza/peso"/>
   <translation tag="Forget" it="Dimentica"/>
   <translation tag="Forget Network?" it="Dimenticare la rete?"/>
@@ -2051,6 +2058,7 @@
   <translation tag="Open feeder" it="Apri alimentatore"/>
   <translation tag="Open feeder macro" it="Macro di apertura alimentatore"/>
   <translation tag="Open frame" it="Telaio aperto"/>
+  <translation tag="Open in ACE" it="Apri in ACE"/>
   <translation tag="Open motion controls for jogging" it="Apri i controlli di movimento"/>
   <translation tag="Open the CFS unit and remove the broken filament from the slot" it="Aprire l&apos;unità CFS e rimuovere il filamento spezzato dallo slot"/>
   <translation tag="Open the slot editor when you load a new spool" it="Apri l&apos;editor dello slot quando carichi una nuova bobina"/>
@@ -3189,6 +3197,7 @@
   <translation tag="Toolhead Sensor" it="Sensore testina"/>
   <translation tag="Toolhead Style" it="Stile testina"/>
   <translation tag="Toolhead Y" it="Testina Y"/>
+  <translation tag="Toolhead command failed" it="Comando della testina non riuscito"/>
   <translation tag="Toolhead jam" it="Inceppamento testina"/>
   <translation tag="Toolhead position unknown" it="Posizione della testina sconosciuta"/>
   <translation tag="Toolheads" it="Testine"/>

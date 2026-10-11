@@ -90,6 +90,10 @@ class AmsSubscriptionBackend : public AmsBackend {
     AmsError unload_filament(int slot_index) final;
     AmsError select_slot(int slot_index) final;
     AmsError change_tool(int tool_number) final;
+    /// Parking moves the CARRIAGE, so it runs the same gate and holds the same
+    /// in-flight claim as the rest: a park cannot dispatch during a print or
+    /// while a load is mid-flight.
+    AmsError park_toolhead() final;
 
     /// Batch load/unload, through the SAME gate and claim as the per-slot ops
     /// above: one claim covers the whole batch, so a batch cannot start while
@@ -296,6 +300,11 @@ class AmsSubscriptionBackend : public AmsBackend {
     virtual AmsError do_unload_filament(int slot_index) = 0;
     virtual AmsError do_select_slot(int slot_index) = 0;
     virtual AmsError do_change_tool(int tool_number) = 0;
+    /// Only reached when supports_toolhead_park() is true; the default refuses
+    /// so a backend that does not park needs no override.
+    virtual AmsError do_park_toolhead() {
+        return AmsErrorHelper::not_supported("Toolhead park");
+    }
 
     /// Backend implementation of a batch load (@p load true) or unload, reached
     /// only after the gate has passed — same contract as the per-slot do_*
@@ -442,7 +451,7 @@ class AmsSubscriptionBackend : public AmsBackend {
   private:
     /// The four gated operations, so motion can be classified per METHOD in one
     /// place instead of per backend at every call site.
-    enum class FilamentOp { Load, Unload, SelectSlot, ChangeTool };
+    enum class FilamentOp { Load, Unload, SelectSlot, ChangeTool, Park };
 
     /// Motion classification, stated ONCE for every backend.
     [[nodiscard]] bool op_moves_toolhead(FilamentOp op) const;

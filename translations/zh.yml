@@ -268,6 +268,10 @@ translations:
   Auto-Detect: 自动检测
   Auto-Heat on Load: 加载时自动加热
   Auto-detect: 自动检测
+  Auto-dry: '自动烘干'
+  Auto-dry off: '自动烘干已关闭'
+  Auto-dry on: '自动烘干已开启'
+  Auto-dry unchanged: '自动烘干未更改'
   Auto-install only works on local Moonraker: 自动安装仅适用于本地 Moonraker
   Auto-lock: 自动锁定
   Auto-poll for weight updates: 自动轮询重量更新
@@ -760,6 +764,7 @@ translations:
   Could not skip {}: '无法跳过 {}'
   Could not start Bluetooth discovery: 无法启动蓝牙发现
   Could not update filaments: 无法更新耗材
+  Could not update slot: '无法更新槽位'
   Could not verify Spoolman status. Moonraker may still be restarting.: 无法验证 Spoolman
     状态。Moonraker 可能仍在重启中。
   Couldn't clear the printer's gate map: 无法清空打印机的通道映射
@@ -908,6 +913,7 @@ translations:
   Downloading...: 下载中...
   Downloading... {:.1f}/{:.1f} MB: 下载中... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: 在每次触摸时绘制涟漪 — 有助于诊断偏移
+  Dries above %d%%, stops below %d%%: '高于 %d%% 时烘干，低于 %d%% 时停止'
   Drive Cal: 驱动校准
   Drop shadow strength (0 = disabled): 阴影强度（0 = 禁用）
   Dry Filament: 烘干耗材
@@ -1317,6 +1323,7 @@ translations:
   Focused: '专注'
   Follow active tool: 跟随当前工具
   Follow graph screen: 跟随图表屏幕
+  Follows unit %d: '跟随单元 %d'
   Force/weight sensors: '力/重量传感器'
   Forget: 忘记
   Forget Network?: 忘记网络？
@@ -2121,6 +2128,7 @@ translations:
   Open feeder: 打开送料器
   Open frame: 开放式机架
 
+  Open in ACE: '在 ACE 中打开'
   Open motion controls for jogging: 打开手动移动控制
   Open the CFS unit and remove the broken filament from the slot: 请打开 CFS 单元并从槽位中取出断裂的耗材
   Open the slot editor when you load a new spool: '装入新料盘时打开槽位编辑器'
@@ -3337,6 +3345,7 @@ translations:
   Toolhead Sensor: 工具头传感器
   Toolhead Style: 工具头样式
   Toolhead Y: 工具头 Y
+  Toolhead command failed: '工具头命令失败'
   Toolhead jam: 工具头堵塞
   Toolhead position unknown: 工具头位置未知
   Toolheads: 工具头

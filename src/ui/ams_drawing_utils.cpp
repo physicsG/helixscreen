@@ -388,11 +388,69 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
         utl.hub_tool_label = unit.hub_tool_label;
         utl.hub_id = unit.hub_id;
 
+        // Cross-unit head sharing. A unit whose lanes all feed heads that an
+        // EARLIER unit already owns is a *source* for those heads, not a new set
+        // of heads, so it reuses their physical nozzles instead of allocating
+        // its own: a multiACE unit's bays all map to the toolchanger head it is
+        // bound to, and allocating would draw one nozzle more than the machine
+        // has. (The HUB branch below shares by hub_tool_label; this is the same
+        // idea keyed on mapped_tool, which every unit populates.)
+        //
+        // Guarded so other multi-unit rigs keep their layout: every one of this
+        // unit's mapped tools must already be claimed (a unit that adds even
+        // one new head allocates normally), each by a unit of several heads
+        // (two hubs on one nozzle are the HUB branch's to group), the reused
+        // nozzles must form a contiguous ascending run (UnitToolLayout can only
+        // express first+count), and units with no mapped_tool at all fall
+        // through.
+        std::vector<int> shared_phys;
+        if (!unit.absent && min_tool >= 0) {
+            auto owned_by_heads_unit = [&result](int phys) {
+                return std::any_of(
+                    result.units.begin(), result.units.end(), [phys](const UnitToolLayout& prev) {
+                        return prev.tool_count > 1 && phys >= prev.first_physical_tool &&
+                               phys < prev.first_physical_tool + prev.tool_count;
+                    });
+            };
+            bool all_claimed = true;
+            for (const auto& slot : unit.slots) {
+                if (slot.mapped_tool < 0) {
+                    continue;
+                }
+                auto it = result.virtual_to_physical.find(slot.mapped_tool);
+                if (it == result.virtual_to_physical.end() || !owned_by_heads_unit(it->second)) {
+                    all_claimed = false;
+                    break;
+                }
+                shared_phys.push_back(it->second);
+            }
+            std::sort(shared_phys.begin(), shared_phys.end());
+            shared_phys.erase(std::unique(shared_phys.begin(), shared_phys.end()),
+                              shared_phys.end());
+            for (size_t k = 1; all_claimed && k < shared_phys.size(); ++k) {
+                if (shared_phys[k] != shared_phys[k - 1] + 1) {
+                    all_claimed = false;
+                }
+            }
+            if (!all_claimed) {
+                shared_phys.clear();
+            }
+        }
+
         if (unit.absent) {
             // A box that is not on the bus feeds no nozzle, so the units around
             // it number their nozzles as if it were not there.
             utl.first_physical_tool = total_physical;
             utl.tool_count = 0;
+        } else if (!shared_phys.empty()) {
+            utl.first_physical_tool = shared_phys.front();
+            utl.tool_count = static_cast<int>(shared_phys.size());
+            for (const auto& slot : unit.slots) {
+                if (slot.mapped_tool < 0) {
+                    continue; // operator[] would insert a bogus -1 key
+                }
+                record_extruder(result.virtual_to_physical[slot.mapped_tool], slot.extruder_name);
+            }
         } else if (topo == helix::PathTopology::MIXED) {
             // MIXED: direct lanes each get their own nozzle position,
             // hub lanes share one nozzle position regardless of mapped_tool.
@@ -607,6 +665,42 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
 
     result.total_physical_tools = total_physical;
 
+    // Which of its nozzles each unit actually FEEDS. Decided after every unit is
+    // placed, because a unit's slots resolve to physical nozzles through the
+    // finished virtual_to_physical map. One backend query per slot: a slot
+    // whose identity is owned by another unit (an ACE-fed U1 head) clears the
+    // bit for the nozzle it maps to. Without a backend nothing is owned
+    // elsewhere and every bit stays set.
+    for (size_t i = 0; i < result.units.size() && i < info.units.size(); ++i) {
+        auto& utl = result.units[i];
+        uint32_t mask = 0;
+        for (int t = 0; t < utl.tool_count && t < 32; ++t) {
+            mask |= (1u << t);
+        }
+        if (backend) {
+            const auto& unit = info.units[i];
+            for (size_t sl = 0; sl < unit.slots.size(); ++sl) {
+                const auto& slot = unit.slots[sl];
+                if (slot.mapped_tool < 0) {
+                    continue;
+                }
+                auto it = result.virtual_to_physical.find(slot.mapped_tool);
+                if (it == result.virtual_to_physical.end()) {
+                    continue;
+                }
+                const int t = it->second - utl.first_physical_tool;
+                if (t < 0 || t >= utl.tool_count || t >= 32) {
+                    continue;
+                }
+                if (backend->slot_identity_owner_unit(unit.first_slot_global_index +
+                                                      static_cast<int>(sl))) {
+                    mask &= ~(1u << t);
+                }
+            }
+        }
+        utl.feeds_mask = mask;
+    }
+
     // Build physical→virtual label map
     result.physical_to_virtual_label.resize(total_physical, -1);
     for (const auto& utl : result.units) {
@@ -674,10 +768,15 @@ ToolBadgeLabels compute_tool_badge_labels(const SystemToolLayout& layout,
     ToolBadgeLabels out;
 
     if (layout_has_extruder_identity(layout)) {
-        out.prefix = 'E';
+        // 'T', not 'E': this labels a TOOLHEAD, which is what every other
+        // surface calls it, so it carries the tool's own 0-based number as
+        // tool_label() spells it. The extruder name is still what supplies the
+        // NUMBER: a virtual lane alias can disagree with the physical toolhead
+        // and an extruder name cannot (prestonbrown/helixscreen#1229).
+        out.prefix = 'T';
         out.numbers.reserve(layout.physical_to_extruder_name.size());
         for (const auto& name : layout.physical_to_extruder_name) {
-            out.numbers.push_back(helix::ui::lane_number(*helix::tool_number_for_extruder(name)));
+            out.numbers.push_back(*helix::tool_number_for_extruder(name));
         }
         return out;
     }

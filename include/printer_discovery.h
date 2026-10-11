@@ -1007,6 +1007,8 @@ class PrinterDiscovery {
     bool has_speaker_ = false;
     bool has_fan_feedback_ = false;
     bool is_kalico_ = false;
+    /// Set by `ace_bg_swap` / `ace_tipform`, which only multiACE registers.
+    bool has_multiace_markers_ = false;
     AmsType mmu_type_ = AmsType::NONE;
     std::vector<DetectedAmsSystem> detected_ams_systems_;
 

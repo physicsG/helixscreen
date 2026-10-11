@@ -59,14 +59,12 @@ using namespace helix;
 // Layout Constants
 // ============================================================================
 
-/// Minimum bar width for mini slot bars (prevents invisible bars)
-static constexpr int32_t MINI_BAR_MIN_WIDTH_PX = 6;
-
-/// Maximum bar width for mini slot bars
-static constexpr int32_t MINI_BAR_MAX_WIDTH_PX = 14;
-
-/// Height of each mini slot bar (decorative, no need for responsive scaling)
-static constexpr int32_t MINI_BAR_HEIGHT_PX = 40;
+// The mini-bar geometry lives in ams_drawing_utils.h: the AMS slot draws the
+// same bars for a position fed from another unit, and the two surfaces must
+// agree on them.
+using ams_draw::MINI_BAR_HEIGHT_PX;
+using ams_draw::MINI_BAR_MAX_WIDTH_PX;
+using ams_draw::MINI_BAR_MIN_WIDTH_PX;
 
 /// Zoom animation duration (ms) for detail view transitions
 static constexpr uint32_t DETAIL_ZOOM_DURATION_MS = 200;
@@ -100,6 +98,41 @@ static int32_t measured_bar_width(lv_obj_t* bars_container, int slot_count) {
     int32_t gap = theme_manager_get_spacing("space_xxs");
     return ams_draw::calc_bar_width(container_width, slot_count, gap, MINI_BAR_MIN_WIDTH_PX,
                                     MINI_BAR_MAX_WIDTH_PX);
+}
+
+/// Local indices of the slots of @p unit that hold a spool of their own. A slot
+/// fed from another unit shows that unit's spool, so it is counted and drawn
+/// on that unit's card, not this one: counting it here would show one
+/// physical spool on two cards.
+static std::vector<int> owned_unit_slots(const AmsUnit& unit) {
+    const AmsBackend* backend = AmsState::instance().get_backend();
+    std::vector<int> owned;
+    owned.reserve(unit.slots.size());
+    for (int s = 0; s < static_cast<int>(unit.slots.size()); ++s) {
+        if (!backend ||
+            !backend->slot_identity_owner_unit(unit.first_slot_global_index + s).has_value()) {
+            owned.push_back(s);
+        }
+    }
+    return owned;
+}
+
+/// Whether @p bars_container already holds exactly one bar per slot in
+/// @p owned, in order. Which slots a unit owns can change without their count
+/// changing, which the geometry check alone cannot see.
+static bool bars_match_slots(lv_obj_t* bars_container, const AmsUnit& unit,
+                             const std::vector<int>& owned) {
+    if (lv_obj_get_child_count(bars_container) != owned.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < owned.size(); ++i) {
+        if (helix::ui::ams_lane_bar_slot_index(
+                lv_obj_get_child(bars_container, static_cast<int32_t>(i))) !=
+            unit.first_slot_global_index + owned[i]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // ============================================================================
@@ -240,6 +273,13 @@ void AmsOverviewPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
         if (system_path_) {
             lv_obj_set_size(system_path_, LV_PCT(100), LV_PCT(100));
             spdlog::debug("[{}] Created system path canvas", get_name());
+
+            // Tapping a nozzle here asks the same question the detail canvas's
+            // nozzle does, so it opens the same menu. The overview is where you
+            // land whenever there is more than one unit, which on a multiACE
+            // rig is always.
+            ui_system_path_canvas_set_toolhead_callback(
+                system_path_, &AmsOverviewPanel::on_toolhead_clicked, this);
 
             bypass_widgets_ = helix::ui::bypass_spool_create(
                 system_path_area_, &AmsOverviewPanel::on_bypass_spool_clicked, this);
@@ -508,7 +548,8 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info, helix::ui::L
             lv_label_set_text(uc.name_label, uc.display_name.c_str());
         }
 
-        set_slot_count_label(uc.slot_count_label, noun, unit.slot_count);
+        set_slot_count_label(uc.slot_count_label, noun,
+                             static_cast<int>(owned_unit_slots(unit).size()));
 
         // Create the mini bars for this unit (dynamic — slot count varies)
         create_mini_bars(uc, unit);
@@ -556,17 +597,20 @@ void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit,
     // event linked list (#776).
     if (card.bars_container) {
         lv_obj_update_layout(card.bars_container);
-        int slot_count = static_cast<int>(unit.slots.size());
+        const std::vector<int> owned = owned_unit_slots(unit);
+        int slot_count = static_cast<int>(owned.size());
         if (helix::ui::lane_bars_stale(card.bars_built,
                                        {unit.first_slot_global_index, slot_count,
-                                        measured_bar_width(card.bars_container, slot_count)})) {
+                                        measured_bar_width(card.bars_container, slot_count)}) ||
+            !bars_match_slots(card.bars_container, unit, owned)) {
             helix::ui::safe_clean_children(card.bars_container);
             create_mini_bars(card, unit);
         }
     }
 
-    // Update slot count
-    set_slot_count_label(card.slot_count_label, noun, unit.slot_count);
+    // Update slot count: the spools this unit OWNS, not the slots it has.
+    set_slot_count_label(card.slot_count_label, noun,
+                         static_cast<int>(owned_unit_slots(unit).size()));
 
     // Update error badge visibility and color
     if (card.error_badge) {
@@ -581,7 +625,10 @@ void AmsOverviewPanel::create_mini_bars(UnitCard& card, const AmsUnit& unit) {
         return;
     }
 
-    int slot_count = static_cast<int>(unit.slots.size());
+    // One bar per spool this unit OWNS, matching the card's count.
+    const std::vector<int> owned_local = owned_unit_slots(unit);
+
+    int slot_count = static_cast<int>(owned_local.size());
     if (slot_count <= 0) {
         card.bars_built = {unit.first_slot_global_index, 0, 0};
         return;
@@ -595,8 +642,12 @@ void AmsOverviewPanel::create_mini_bars(UnitCard& card, const AmsUnit& unit) {
     int32_t bar_width = measured_bar_width(card.bars_container, slot_count);
     card.bars_built = {unit.first_slot_global_index, slot_count, bar_width};
 
-    helix::ui::ams_lane_bar_create_range(card.bars_container, unit.first_slot_global_index,
-                                         slot_count, bar_width, MINI_BAR_HEIGHT_PX);
+    // ams_lane_bar_create_range() builds a contiguous run, and the owned slots
+    // need not be one, so each bar is its own run of one.
+    for (int s : owned_local) {
+        helix::ui::ams_lane_bar_create_range(card.bars_container, unit.first_slot_global_index + s,
+                                             1, bar_width, MINI_BAR_HEIGHT_PX);
+    }
 }
 
 // ============================================================================
@@ -789,6 +840,14 @@ void AmsOverviewPanel::refresh_system_path(const AmsSystemInfo& info, int curren
             const auto& utl = tool_layout.units[i];
             ui_system_path_canvas_set_unit_tools(system_path_, i, utl.tool_count,
                                                  utl.first_physical_tool);
+
+            // Which of those tools does this unit actually FEED. A toolchanger
+            // head fed by an MMU belongs to the U1 but is supplied by the ACE,
+            // and drawing a line from both units to one nozzle says two things
+            // feed it. The layout answers this from the same walk that placed
+            // the nozzles (UnitToolLayout::feeds_mask); this panel only forwards
+            // it. A mask of 0 is a real answer here -- every head fed elsewhere.
+            ui_system_path_canvas_set_unit_tool_mask(system_path_, i, utl.feeds_mask);
 
             // The unit's hub and the buffer under it: the box the unit view shows
             // for the hub's first unit. Units on one hub get one group number.
@@ -1050,6 +1109,9 @@ void AmsOverviewPanel::step_page(int delta) {
     if (!unit_view_active_ || page_ < 0 || next < 0 || next >= static_cast<int>(pages_.size()))
         return;
     page_ = next;
+    // Paging by hand leaves the page "Open in <unit>" landed on, so Back is the
+    // cards again.
+    return_unit_key_.clear();
     auto* backend = AmsState::instance().get_backend();
     if (!backend)
         return;
@@ -1154,6 +1216,36 @@ void AmsOverviewPanel::show_unit_view(int unit_index) {
     }
 }
 
+void AmsOverviewPanel::open_source_unit(int owner_unit) {
+    if (!unit_view_active_) {
+        show_unit_view(owner_unit);
+        return;
+    }
+    // Back from the owner's page belongs at the page it was opened from, not at
+    // the cards the user never visited on the way.
+    return_unit_key_ = shown_unit_key_;
+    sync_pages(/*reopen=*/false, owner_unit);
+}
+
+void AmsOverviewPanel::leave_unit_view() {
+    // Consumed before paging: the page it names is where this lands, and Back
+    // from there is the cards.
+    const std::string back_to = std::move(return_unit_key_);
+    return_unit_key_.clear();
+    if (unit_view_active_ && !back_to.empty() && back_to != shown_unit_key_) {
+        if (auto* backend = AmsState::instance().get_backend()) {
+            const AmsSystemInfo info = backend->get_system_info();
+            for (int pos = 0; pos < static_cast<int>(info.units.size()); ++pos) {
+                if (unit_key(info.units[pos]) == back_to) {
+                    sync_pages(/*reopen=*/false, pos);
+                    return;
+                }
+            }
+        }
+    }
+    show_overview();
+}
+
 void AmsOverviewPanel::show_overview() {
     if (!panel_ || !detail_container_ || !cards_row_)
         return;
@@ -1171,6 +1263,8 @@ void AmsOverviewPanel::show_overview() {
     // The page no longer follows the backend from here on, even while the zoom-out plays.
     unit_view_active_ = false;
     AmsState::instance().set_viewed_unit(-1);
+    // The cards are the top of this panel; nothing is left to go back to.
+    return_unit_key_.clear();
 
     if (DisplaySettingsManager::instance().get_animations_enabled()) {
         // Zoom-out animation: scale down + fade out, then swap visibility
@@ -1239,6 +1333,7 @@ void AmsOverviewPanel::reset_to_overview() {
     page_ = -1;
     shown_unit_key_.clear();
     shown_unit_pos_ = -1;
+    return_unit_key_.clear();
 
     refresh_units();
 }
@@ -1474,7 +1569,7 @@ static void ensure_overview_registered() {
         LV_UNUSED(e);
         AmsOverviewPanel* panel = g_overview_panel_instance.load();
         if (panel && panel->is_in_unit_view()) {
-            panel->show_overview();
+            panel->leave_unit_view();
         } else {
             helix::nav::go_back();
         }
@@ -1645,12 +1740,27 @@ void AmsOverviewPanel::show_detail_context_menu(int slot_index, lv_obj_t* near_w
     host.log_tag = "[AmsOverview]";
     host.path_canvas = [this] { return detail_path_canvas_; };
     host.sidebar = [this] { return sidebar_.get(); };
+    // The slot's spool is described by another unit, and this panel can show
+    // that unit's page in place.
+    host.open_source_unit = [this](int owner_unit) { open_source_unit(owner_unit); };
     helix::ui::open_slot_context_menu(*context_menu_, host, slot_index, near_widget, click_pt);
 }
 
 // ============================================================================
 // Bypass Spool Interaction
 // ============================================================================
+
+void AmsOverviewPanel::on_toolhead_clicked(int tool_index, void* user_data) {
+    auto* self = static_cast<AmsOverviewPanel*>(user_data);
+    if (!self) {
+        return;
+    }
+    // The canvas hands back the tool number off the badge; the helper (shared
+    // with AmsPanel) range-checks it, reads the touch point, builds the menu on
+    // first use and wires the shared dispatch.
+    helix::ui::show_toolhead_menu_at_touch(self->toolhead_menu_, self->parent_screen_,
+                                           self->system_path_, tool_index);
+}
 
 void AmsOverviewPanel::on_bypass_spool_clicked(lv_event_t* e) {
     if (auto* self = static_cast<AmsOverviewPanel*>(lv_event_get_user_data(e))) {

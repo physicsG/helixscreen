@@ -137,6 +137,7 @@ src/printer/ams_backend_ad5x_ifs.cpp
 src/printer/ams_backend_afc.cpp
 src/printer/ams_backend_cfs.cpp
 src/printer/ams_backend_happy_hare.cpp
+src/printer/ams_backend_multiace.cpp
 src/printer/ams_backend_openams.cpp
 src/printer/ams_bypass_policy.cpp
 src/printer/ams_backend_qidi.cpp
@@ -424,6 +425,7 @@ src/ui/ui_multiselect.cpp
 src/ui/ui_batch_filament_modal.cpp
 src/ui/ui_ams_sidebar.cpp
 src/ui/ui_ams_slot.cpp
+src/ui/ui_ams_toolhead_menu.cpp
 src/ui/ui_buffer_slider.cpp
 src/ui/ui_busy_overlay.cpp
 src/ui/ui_button.cpp

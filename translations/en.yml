@@ -281,6 +281,10 @@ translations:
   Auto-Detect: Auto-Detect
   Auto-Heat on Load: Auto-Heat on Load
   Auto-detect: Auto-detect
+  Auto-dry: Auto-dry
+  Auto-dry off: Auto-dry off
+  Auto-dry on: Auto-dry on
+  Auto-dry unchanged: Auto-dry unchanged
   Auto-install only works on local Moonraker: Auto-install only works on local Moonraker
   Auto-lock: Auto-lock
   Auto-poll for weight updates: Auto-poll for weight updates
@@ -798,6 +802,7 @@ translations:
   Could not skip {}: Could not skip {}
   Could not start Bluetooth discovery: Could not start Bluetooth discovery
   Could not update filaments: Could not update filaments
+  Could not update slot: Could not update slot
   Could not verify Spoolman status. Moonraker may still be restarting.: Could not
     verify Spoolman status. Moonraker may still be restarting.
   Couldn't clear the printer's gate map: Couldn't clear the printer's gate map
@@ -948,6 +953,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Downloading... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: Draw a ripple at each touch
     — helps diagnose offsets
+  Dries above %d%%, stops below %d%%: Dries above %d%%, stops below %d%%
   Drive Cal: Drive Cal
   Drop shadow strength (0 = disabled): Drop shadow strength (0 = disabled)
   Dry Filament: Dry Filament
@@ -1361,6 +1367,7 @@ translations:
   Flying Toasters: Flying Toasters
   Focused: Focused
   Follow active tool: Follow active tool
+  Follows unit %d: Follows unit %d
   Follow graph screen: Follow graph screen
   Force/weight sensors: Force/weight sensors
   Forget: Forget
@@ -2198,6 +2205,7 @@ translations:
   Open feeder: Open feeder
   Open feeder macro: Open feeder macro
   Open frame: Open frame
+  Open in ACE: Open in ACE
   Open motion controls for jogging: Open motion controls for jogging
   Open the CFS unit and remove the broken filament from the slot: Open the CFS unit and remove the broken filament from the slot
   Open the slot editor when you load a new spool: Open the slot editor when you load a new spool
@@ -3477,6 +3485,7 @@ translations:
   Toolhead Sensor: Toolhead Sensor
   Toolhead Style: Toolhead Style
   Toolhead Y: Toolhead Y
+  Toolhead command failed: Toolhead command failed
   Toolhead jam: Toolhead jam
   Toolhead position unknown: Toolhead position unknown
   Toolheads: Toolheads

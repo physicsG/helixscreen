@@ -78,9 +78,11 @@ set -eu
 # non-standard tool still resolves as a fallback.
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-# Configuration
-GITHUB_REPO="prestonbrown/helixscreen"
-SERVICE_NAME="helixscreen"
+# Configuration. Soft assignments so the environment wins: a fork install is
+# `GITHUB_REPO=me/helixscreen sh install.sh`, and a hard `=` here silently
+# clobbered it before the modules' own defaults were ever consulted.
+: "${GITHUB_REPO:=prestonbrown/helixscreen}"
+: "${SERVICE_NAME:=helixscreen}"
 
 HEADER
 

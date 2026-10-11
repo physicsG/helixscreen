@@ -290,6 +290,10 @@ translations:
   Auto-Detect: Auto-Detectar
   Auto-Heat on Load: Calentar Automáticamente al Cargar
   Auto-detect: Auto-detectar
+  Auto-dry: 'Secado automático'
+  Auto-dry off: 'Secado automático desactivado'
+  Auto-dry on: 'Secado automático activado'
+  Auto-dry unchanged: 'Secado automático sin cambios'
   Auto-install only works on local Moonraker: La instalación automática solo funciona
     con Moonraker local
   Auto-lock: Bloqueo automático
@@ -831,6 +835,7 @@ translations:
   Could not skip {}: 'No se pudo omitir {}'
   Could not start Bluetooth discovery: No se pudo iniciar el descubrimiento Bluetooth
   Could not update filaments: No se pudieron actualizar los filamentos
+  Could not update slot: 'No se pudo actualizar la ranura'
   Could not verify Spoolman status. Moonraker may still be restarting.: No se pudo
     verificar el estado de Spoolman. Moonraker puede estar reiniciándose.
   Couldn't clear the printer's gate map: No se pudo borrar el mapa de gates de la impresora
@@ -981,6 +986,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Descargando... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: Dibuja una onda en cada toque
     — ayuda a diagnosticar desfases
+  Dries above %d%%, stops below %d%%: 'Seca por encima del %d%%, para por debajo del %d%%'
   Drive Cal: Cal Transmisión
   Drop shadow strength (0 = disabled): Intensidad de sombra (0 = desactivada)
   Dry Filament: Secar filamento
@@ -1411,6 +1417,7 @@ translations:
   Focused: 'Enfocado'
   Follow active tool: Seguir herramienta activa
   Follow graph screen: Seguir pantalla del gráfico
+  Follows unit %d: 'Sigue a la unidad %d'
   Force/weight sensors: 'Sensores de fuerza/peso'
   Forget: Olvidar
   Forget Network?: ¿Olvidar red?
@@ -2265,6 +2272,7 @@ translations:
   Open feeder: Abrir alimentador
   Open frame: Marco abierto
 
+  Open in ACE: 'Abrir en ACE'
   Open motion controls for jogging: Abrir los controles de movimiento
   Open the CFS unit and remove the broken filament from the slot: Abra la unidad CFS y retire el filamento roto de la ranura
   Open the slot editor when you load a new spool: 'Abrir el editor de ranura al cargar una bobina nueva'
@@ -3586,6 +3594,7 @@ translations:
   Toolhead Sensor: Sensor del Cabezal
   Toolhead Style: Estilo de Cabezal
   Toolhead Y: Cabezal Y
+  Toolhead command failed: 'El comando del cabezal falló'
   Toolhead jam: Atasco del cabezal
   Toolhead position unknown: Posición del cabezal desconocida
   Toolheads: Cabezales

@@ -87,7 +87,8 @@ bool BatchFilamentModal::show_owned(bool for_load) {
     if (!modal->show(lv_screen_active())) {
         return false; // the unique_ptr frees the never-shown instance
     }
-    ModalStack::instance().assume_ownership(modal->backdrop(), std::move(modal));
+    lv_obj_t* backdrop = modal->backdrop();
+    ModalStack::instance().assume_ownership(backdrop, std::move(modal));
     return true;
 }
 

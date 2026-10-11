@@ -116,6 +116,9 @@ EXEMPT_SUBSTRINGS = (
     # Written at runtime.
     'settings-test.json',  # seeded by --test
     'config/settings.json',
+    'release_info.json',   # written into INSTALL_DIR by the installer
+    # GitHub release-asset URL path, not a repo path.
+    'releases/latest/download/',
     # Device runtime state (systemd StateDirectory): root-owned files a dev
     # box never has, e.g. update_urls.json.
     'var/lib/helixscreen/',

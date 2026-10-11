@@ -269,6 +269,10 @@ translations:
   Auto-Detect: 自動検出
   Auto-Heat on Load: 装填時に自動加熱
   Auto-detect: 自動検出
+  Auto-dry: '自動乾燥'
+  Auto-dry off: '自動乾燥オフ'
+  Auto-dry on: '自動乾燥オン'
+  Auto-dry unchanged: '自動乾燥は変更なし'
   Auto-install only works on local Moonraker: 自動インストールはローカルの Moonraker でのみ動作します
   Auto-lock: 自動ロック
   Auto-poll for weight updates: 重量更新の自動ポーリング
@@ -762,6 +766,7 @@ translations:
   Could not skip {}: '{} をスキップできませんでした'
   Could not start Bluetooth discovery: Bluetooth の検出を開始できませんでした
   Could not update filaments: フィラメントを更新できませんでした
+  Could not update slot: 'スロットを更新できませんでした'
   Could not verify Spoolman status. Moonraker may still be restarting.: Spoolman のステータスを確認できませんでした。Moonraker
     がまだ再起動中の可能性があります。
   Couldn't clear the printer's gate map: プリンターのゲートマップをクリアできませんでした
@@ -911,6 +916,7 @@ translations:
   Downloading...: ダウンロード中...
   Downloading... {:.1f}/{:.1f} MB: ダウンロード中... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: タッチごとに波紋を描画 — ズレの診断に役立ちます
+  Dries above %d%%, stops below %d%%: '%d%% を超えると乾燥し、%d%% を下回ると停止します'
   Drive Cal: ドライブキャリブレーション
   Drop shadow strength (0 = disabled): 影の強さ (0 = 無効)
   Dry Filament: フィラメントを乾燥
@@ -1321,6 +1327,7 @@ translations:
   Focused: '集中'
   Follow active tool: アクティブツールに追従
   Follow graph screen: グラフ画面に追従
+  Follows unit %d: 'ユニット %d に従う'
   Force/weight sensors: '力/重量センサー'
   Forget: 登録解除
   Forget Network?: ネットワークを登録解除しますか？
@@ -2128,6 +2135,7 @@ translations:
   Open feeder: フィーダーを開く
   Open frame: オープンフレーム
 
+  Open in ACE: 'ACEで開く'
   Open motion controls for jogging: ジョグ操作を開く
   Open the CFS unit and remove the broken filament from the slot: CFS ユニットを開け、スロットから折れたフィラメントを取り除いてください
   Open the slot editor when you load a new spool: '新しいスプールを装填したときにスロットエディタを開く'
@@ -3346,6 +3354,7 @@ translations:
   Toolhead Sensor: ツールヘッドセンサー
   Toolhead Style: ツールヘッドスタイル
   Toolhead Y: ツールヘッド Y
+  Toolhead command failed: 'ツールヘッドコマンドが失敗しました'
   Toolhead jam: ツールヘッドの詰まり
   Toolhead position unknown: ツールヘッドの位置が不明です
   Toolheads: ツールヘッド

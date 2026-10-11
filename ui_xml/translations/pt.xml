@@ -265,6 +265,10 @@
   <translation tag="Auto-Detect" pt="Auto-Detectar"/>
   <translation tag="Auto-Heat on Load" pt="Aquecer Automaticamente ao Carregar"/>
   <translation tag="Auto-detect" pt="Auto-detectar"/>
+  <translation tag="Auto-dry" pt="Secagem automática"/>
+  <translation tag="Auto-dry off" pt="Secagem automática desativada"/>
+  <translation tag="Auto-dry on" pt="Secagem automática ativada"/>
+  <translation tag="Auto-dry unchanged" pt="Secagem automática inalterada"/>
   <translation tag="Auto-install only works on local Moonraker" pt="A instalação automática só funciona no Moonraker local"/>
   <translation tag="Auto-lock" pt="Bloqueio automático"/>
   <translation tag="Auto-poll for weight updates" pt="Consultar peso automaticamente"/>
@@ -740,6 +744,7 @@
   <translation tag="Could not skip {}" pt="Não foi possível pular {}"/>
   <translation tag="Could not start Bluetooth discovery" pt="Não foi possível iniciar a descoberta Bluetooth"/>
   <translation tag="Could not update filaments" pt="Não foi possível atualizar os filamentos"/>
+  <translation tag="Could not update slot" pt="Não foi possível atualizar o slot"/>
   <translation tag="Could not verify Spoolman status. Moonraker may still be restarting." pt="Não foi possível verificar o status do Spoolman. O Moonraker pode ainda estar reiniciando."/>
   <translation tag="Couldn&apos;t clear the printer&apos;s gate map" pt="Não foi possível limpar o mapa de gates da impressora"/>
   <translation tag="Couldn&apos;t save the material name" pt="Não foi possível salvar o nome do material"/>
@@ -885,6 +890,7 @@
   <translation tag="Downloading..." pt="Baixando..."/>
   <translation tag="Downloading... {:.1f}/{:.1f} MB" pt="Baixando... {:.1f}/{:.1f} MB"/>
   <translation tag="Draw a ripple at each touch — helps diagnose offsets" pt="Desenha uma onda em cada toque — ajuda a diagnosticar deslocamentos"/>
+  <translation tag="Dries above %d%%, stops below %d%%" pt="Seca acima de %d%%, para abaixo de %d%%"/>
   <translation tag="Drive Cal" pt="Cal de Drive"/>
   <translation tag="Drop shadow strength (0 = disabled)" pt="Intensidade da sombra (0 = desabilitado)"/>
   <translation tag="Dry Filament" pt="Secar filamento"/>
@@ -1278,6 +1284,7 @@
   <translation tag="Focused" pt="Focado"/>
   <translation tag="Follow active tool" pt="Seguir ferramenta ativa"/>
   <translation tag="Follow graph screen" pt="Acompanhar tela do gráfico"/>
+  <translation tag="Follows unit %d" pt="Segue a unidade %d"/>
   <translation tag="Force/weight sensors" pt="Sensores de força/peso"/>
   <translation tag="Forget" pt="Esquecer"/>
   <translation tag="Forget Network?" pt="Esquecer Rede?"/>
@@ -2051,6 +2058,7 @@
   <translation tag="Open feeder" pt="Abrir alimentador"/>
   <translation tag="Open feeder macro" pt="Macro de abrir alimentador"/>
   <translation tag="Open frame" pt="Estrutura aberta"/>
+  <translation tag="Open in ACE" pt="Abrir no ACE"/>
   <translation tag="Open motion controls for jogging" pt="Abrir os controles de movimento"/>
   <translation tag="Open the CFS unit and remove the broken filament from the slot" pt="Abra a unidade CFS e remova o filamento partido do slot"/>
   <translation tag="Open the slot editor when you load a new spool" pt="Abrir o editor de slot ao carregar um novo carretel"/>
@@ -3189,6 +3197,7 @@
   <translation tag="Toolhead Sensor" pt="Sensor do Cabeçote"/>
   <translation tag="Toolhead Style" pt="Estilo do Cabeçote"/>
   <translation tag="Toolhead Y" pt="Cabeçote Y"/>
+  <translation tag="Toolhead command failed" pt="Falha no comando do cabeçote"/>
   <translation tag="Toolhead jam" pt="Atolamento do cabeçote"/>
   <translation tag="Toolhead position unknown" pt="Posição do cabeçote desconhecida"/>
   <translation tag="Toolheads" pt="Cabeçotes"/>

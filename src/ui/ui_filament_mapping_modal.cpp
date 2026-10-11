@@ -308,8 +308,11 @@ std::string FilamentMappingModal::get_slot_display_text(const helix::ToolMapping
     }
 
     // No AvailableSlot here to carry a noun, so the active printer answers for
-    // it. lane_label() spells the whole label, so there is no buffer here for a
-    // translated noun to overrun.
+    // it, with the number the slot's badge shows. The label helpers spell the
+    // whole label, so there is no buffer here for a translated noun to overrun.
+    if (const helix::AmsBackend* backend = helix::AmsState::instance().get_backend()) {
+        return helix::ui::backend_lane_label(*backend, mapping.mapped_slot);
+    }
     return helix::ui::lane_label(helix::ui::active_lane_noun(), mapping.mapped_slot);
 }
 

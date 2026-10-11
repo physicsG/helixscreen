@@ -146,14 +146,15 @@ TEST_CASE_METHOD(MultiBackendFixture,
 //
 // A U1 running multiACE reports both `ace` and the U1's own `filament_detect`.
 // AmsBackendAce cannot read multiACE's per-unit `aces[]` slot shape, so the
-// Snapmaker backend has to keep the printer. The cases below are one matrix:
-// the rule must fire on both markers together, must NOT fire on either marker
-// alone, and must not reach past ACE to a filament system we can read. Drop any
-// one of those and it becomes "ACE never wins" or "the U1 never wins".
+// printer goes to the multiACE backend, which keeps the U1's four heads and
+// adds the ACE units beside them. The cases below are one matrix: the rule
+// must fire on both markers together, must NOT fire on either marker alone,
+// and must not reach past ACE to a filament system we can read. Drop any one of
+// those and it becomes "ACE never wins" or "the U1 never wins".
 // ----------------------------------------------------------------------------
 
 TEST_CASE_METHOD(MultiBackendFixture,
-                 "PrinterDiscovery: ace alongside filament_detect keeps the Snapmaker backend",
+                 "PrinterDiscovery: ace alongside filament_detect registers the multiACE backend",
                  "[ams][ace][snapmaker][multi-backend]") {
     helix::PrinterDiscovery hw;
     // A U1's object list with multiACE installed: the stock four-toolhead
@@ -167,13 +168,33 @@ TEST_CASE_METHOD(MultiBackendFixture,
     // typo in the object name rather than on the rule under test.
     REQUIRE(hw.ace_object_names() == std::vector<std::string>{"ace"});
 
-    REQUIRE_FALSE(hw.has_mmu());
+    REQUIRE(hw.has_mmu());
     REQUIRE(hw.has_snapmaker());
+    REQUIRE(hw.mmu_type() == helix::AmsType::MULTIACE);
+
+    // Exactly one backend. A toolchanger with four tools is also present, so
+    // this also proves neither the plain U1 fallback nor TOOL_CHANGER was
+    // registered beside it.
+    const auto& systems = hw.detected_ams_systems();
+    REQUIRE(systems.size() == 1);
+    REQUIRE(systems[0].type == helix::AmsType::MULTIACE);
+}
+
+TEST_CASE_METHOD(MultiBackendFixture,
+                 "PrinterDiscovery: a non-bare ACE object on a U1 keeps the Snapmaker backend",
+                 "[ams][ace][snapmaker][multi-backend]") {
+    helix::PrinterDiscovery hw;
+    // Not multiACE (which registers a bare `ace`), and no ACE backend reads an
+    // Anycubic hub on a U1, so the U1's own backend keeps the printer.
+    nlohmann::json objects = nlohmann::json::array(
+        {"filament_hub", "filament_detect", "toolchanger", "tool T0", "tool T1", "tool T2",
+         "tool T3", "extruder", "extruder1", "extruder2", "extruder3", "print_task_config"});
+    hw.parse_objects(objects);
+
+    REQUIRE(hw.ace_object_names() == std::vector<std::string>{"filament_hub"});
+    REQUIRE_FALSE(hw.has_mmu());
     REQUIRE(hw.mmu_type() == helix::AmsType::SNAPMAKER);
 
-    // Exactly one backend, and it is the U1's. A toolchanger with four tools is
-    // also present, so SNAPMAKER here also proves the fallback did not slide
-    // down to TOOL_CHANGER.
     const auto& systems = hw.detected_ams_systems();
     REQUIRE(systems.size() == 1);
     REQUIRE(systems[0].type == helix::AmsType::SNAPMAKER);

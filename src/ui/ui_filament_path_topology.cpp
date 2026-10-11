@@ -93,7 +93,15 @@ SlotRenderStates compute_slot_render_states(const FilamentPathData* data) {
 
         // Active slot overrides with current load/unload state when present.
         s.is_mounted = (i == data->active_slot);
-        if (s.is_mounted && data->filament_segment > 0) {
+
+        // The aggregate (filament_segment / filament_color) describes one shared
+        // route to one nozzle. On PARALLEL each tool owns its own path and the
+        // backend answers per slot, so the aggregate may refine a slot that has
+        // filament (it carries the live segment mid-load) but never create one:
+        // a backend whose aggregate never reports NONE would otherwise draw a
+        // full lane on an empty mounted tool.
+        const bool parallel = data->topology == static_cast<int>(PathTopology::PARALLEL);
+        if (s.is_mounted && data->filament_segment > 0 && (!parallel || s.has_filament)) {
             s.has_filament = true;
             s.color = lv_color_hex(data->filament_color);
             s.segment = static_cast<PathSegment>(data->filament_segment);
@@ -466,7 +474,31 @@ void draw_nozzle_glyph(const RenderCtx& ctx, const LinearHubFrame& f) {
         noz_color =
             (f.has_error && f.error_seg == PathSegment::NOZZLE) ? f.error_color : f.active_color;
     }
-    draw_toolhead(ctx.layer, f.center_x, f.nozzle_y, noz_color, data->theme.extruder_scale);
+
+    // On a toolchanger this single nozzle IS a specific head, so say which one
+    // and whether it is the one on the carriage: badged, and dimmed when it is
+    // docked, matching what the PARALLEL renderer does per column.
+    // mounted_tool < 0 with no mapped tool means "not a toolchanger": drawn
+    // solid and unlabelled.
+    int unit_tool = -1;
+    for (int i = 0; i < data->slot_count; ++i) {
+        if (data->mapped_tool[i] >= 0) {
+            unit_tool = data->mapped_tool[i];
+            break;
+        }
+    }
+    const bool toolchanger_view = (data->mounted_tool >= 0 || unit_tool >= 0);
+    const bool is_mounted = (unit_tool >= 0 && unit_tool == data->mounted_tool);
+    const lv_opa_t noz_opa = (!toolchanger_view || is_mounted) ? LV_OPA_COVER : LV_OPA_40;
+
+    draw_toolhead(ctx.layer, f.center_x, f.nozzle_y, noz_color, data->theme.extruder_scale,
+                  noz_opa);
+
+    if (toolchanger_view && unit_tool >= 0) {
+        char tool_label[16];
+        format_tool_badge_label(data, 0, unit_tool, tool_label, sizeof(tool_label));
+        draw_tool_badge(ctx, f.center_x, f.nozzle_y, data->theme.extruder_scale, tool_label);
+    }
 }
 
 // LINEAR/HUB renderer: frame → plan → tubes → boxes and glyphs. Hit-rect

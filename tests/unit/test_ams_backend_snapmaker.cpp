@@ -631,6 +631,143 @@ TEST_CASE_METHOD(SnapmakerFixture,
     }
 }
 
+// Mounting a head does not load it. The U1 parks four heads and picks one up,
+// so an EMPTY head on the carriage is an ordinary state, and it must not render
+// as a head holding filament. filament_exist is the presence answer.
+TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker a mounted but empty toolhead is not loaded",
+                 "[ams][snapmaker][unload]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    // T0 on the carriage, nothing in any channel.
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"toolhead", json{{"extruder", "extruder"}}},
+                      {"print_task_config",
+                       json{{"filament_exist", json::array({false, false, false, false})}}}});
+
+    CHECK(backend.get_slot_info(0).status == SlotStatus::EMPTY);
+    CHECK_FALSE(backend.get_system_info().filament_loaded);
+    CHECK_FALSE(backend.slot_has_filament_at_toolhead(0));
+    // Nothing to retract, so no Unload is offered.
+    CHECK_FALSE(backend.can_unload_from_toolhead(0));
+    // Mounted is still reported — it is a different question from loaded.
+    CHECK(backend.get_system_info().mount_state == MountState::MOUNTED);
+    CHECK(backend.get_system_info().mounted_tool == 0);
+}
+
+// The extruder pins say which head is on the carriage, and "every one PARKED"
+// is an answer: the carriage is empty. toolhead.extruder always names some
+// extruder, so once the pins have been seen it must not elect a parked head.
+TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker all heads parked means no tool is mounted",
+                 "[ams][snapmaker][mount]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    const json parked = json{{"state", "PARKED"}, {"park_pin", true}, {"active_pin", false}};
+    const json active = json{{"state", "ACTIVE"}, {"park_pin", false}, {"active_pin", true}};
+
+    // T2 on the carriage.
+    SnapmakerTestAccess::handle_status(backend, json{{"toolhead", json{{"extruder", "extruder2"}}},
+                                                     {"extruder", parked},
+                                                     {"extruder1", parked},
+                                                     {"extruder2", active},
+                                                     {"extruder3", parked}});
+    REQUIRE(backend.get_system_info().current_tool == 2);
+    REQUIRE(backend.get_system_info().mount_state == MountState::MOUNTED);
+    REQUIRE(backend.get_system_info().mounted_tool == 2);
+
+    // It docks. Klipper goes on naming extruder2 as the toolhead's extruder.
+    SnapmakerTestAccess::handle_status(backend, json{{"toolhead", json{{"extruder", "extruder2"}}},
+                                                     {"extruder2", parked}});
+
+    CHECK(backend.get_system_info().current_tool == -1);
+    CHECK(backend.get_system_info().mount_state == MountState::NONE);
+    CHECK(backend.get_system_info().mounted_tool == -1);
+    CHECK_FALSE(backend.get_system_info().filament_loaded);
+}
+
+// The mounted slot's LOADED status and filament_loaded follow a load that
+// completes while the tool stays put — the normal case, since a head is mounted
+// and then fed.
+TEST_CASE_METHOD(SnapmakerFixture,
+                 "Snapmaker mounted slot tracks a load that completes without a tool change",
+                 "[ams][snapmaker][channel_state]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    // Mount T0 with an empty channel: nothing is loaded yet.
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"toolhead", json{{"extruder", "extruder"}}},
+                      {"print_task_config",
+                       json{{"filament_exist", json::array({false, false, false, false})}}}});
+    REQUIRE(backend.get_slot_info(0).status == SlotStatus::EMPTY);
+
+    // Filament arrives and reaches the toolhead — no tool change anywhere.
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"print_task_config",
+                       json{{"filament_exist", json::array({true, false, false, false})}}}});
+    SnapmakerTestAccess::handle_status(backend, make_feed_status(0, "load_finish"));
+
+    CHECK(backend.get_slot_info(0).status == SlotStatus::LOADED);
+    CHECK(backend.get_system_info().filament_loaded);
+    CHECK(backend.can_unload_from_toolhead(0));
+}
+
+// A runout on the mounted tool must break the path to the nozzle without
+// withdrawing Unload — the two answers differ, and after a runout the user needs
+// Unload most.
+TEST_CASE_METHOD(SnapmakerFixture,
+                 "Snapmaker runout on the mounted tool clears filament_loaded but keeps unload",
+                 "[ams][snapmaker][runout]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"toolhead", json{{"extruder", "extruder"}}},
+                      {"print_task_config",
+                       json{{"filament_exist", json::array({true, false, false, false})}}}});
+    SnapmakerTestAccess::handle_status(backend, make_feed_status(0, "load_finish"));
+    REQUIRE(backend.get_system_info().filament_loaded);
+
+    // The active lane's motion sensor drops mid-extrusion.
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"filament_motion_sensor e0_filament", json{{"filament_detected", false}}}});
+
+    CHECK_FALSE(backend.get_system_info().filament_loaded);
+    CHECK(backend.get_filament_segment() != PathSegment::NOZZLE);
+    // The latch — and therefore Unload — is untouched by the motion sensor.
+    CHECK(SnapmakerTestAccess::loaded_at_toolhead(backend, 0));
+    CHECK(backend.can_unload_from_toolhead(0));
+}
+
+// A full query carries all four channels. The idle ones that follow the
+// operating head in the frame must not blank its step.
+TEST_CASE_METHOD(SnapmakerFixture,
+                 "Snapmaker a full frame keeps the operating head's step over idle channels",
+                 "[ams][snapmaker][phase]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    SnapmakerTestAccess::handle_status(
+        backend,
+        json{{"filament_feed left",
+              json{{"extruder0", json{{"filament_detected", true},
+                                      {"channel_state", "unload_heating"},
+                                      {"channel_error", "ok"}}},
+                    {"extruder1", json{{"filament_detected", false},
+                                       {"channel_state", "wait_insert"},
+                                       {"channel_error", "ok"}}}}},
+             {"filament_feed right",
+              json{{"extruder2", json{{"filament_detected", false},
+                                      {"channel_state", "wait_insert"},
+                                      {"channel_error", "ok"}}},
+                    {"extruder3", json{{"filament_detected", false},
+                                       {"channel_state", "wait_insert"},
+                                       {"channel_error", "ok"}}}}}});
+
+    // Unload step 2 is Heat nozzle.
+    CHECK(backend.get_system_info().operation_phase == 2);
+
+    // A frame naming only idle channels still clears it.
+    SnapmakerTestAccess::handle_status(backend, make_feed_status(0, "unload_finish"));
+    CHECK(backend.get_system_info().operation_phase == -1);
+}
+
 // channel_error scoping — the firmware reports channel_error="no_filament" for
 // any lane sitting empty, INCLUDING a lane deliberately left unloaded for a
 // multi-color print (heads 0+2 used, head 1 empty). Post-print that idle empty
@@ -1381,14 +1518,15 @@ TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker parked head draws its per-slot pat
 
 TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker active pin alone does not mark a tool loaded",
                  "[ams][snapmaker][channel_state][parked]") {
-    // The frame's active_pin names tool 1 while toolhead.extruder names tool 3,
-    // and tool 1's latch is clear: tool 1 is not loaded.
+    // The frame's active_pin names tool 1 while toolhead.extruder names tool 3.
+    // The pins decide which head is mounted, so tool 1 is the current tool, and
+    // its latch is clear: mounted is not loaded.
     helix::test::RegisteredBackend<AmsBackendSnapmaker> backend_reg(nullptr, nullptr);
     AmsBackendSnapmaker& backend = *backend_reg;
     SnapmakerTestAccess::handle_status(
         backend, merged({json{{"extruder1", json{{"active_pin", true}, {"park_pin", false}}}},
                          t3_picked(), make_feed_status(1, "preload_finish", true), t3_feed()}));
-    REQUIRE(backend.get_system_info().current_tool == 3);
+    REQUIRE(backend.get_system_info().current_tool == 1);
     CHECK(backend.get_slot_info(1).status != SlotStatus::LOADED);
     CHECK_FALSE(backend.slot_is_actively_loaded(1));
 }
@@ -3345,8 +3483,14 @@ TEST_CASE_METHOD(SnapmakerFixture,
     const auto& hist = h.client.gcode_script_history();
 
     // (a) The single firmware load call was issued: AUTO_FEEDING with LOAD=1
-    // PRINTING=1 (#991) — homes, switches tool, feeds, heats, extrudes, flushes.
-    REQUIRE(any_script_contains(hist, "AUTO_FEEDING EXTRUDER=0 LOAD=1 PRINTING=1"));
+    // (#991) — homes, switches tool, feeds, heats, extrudes, flushes.
+    REQUIRE(any_script_contains(hist, "AUTO_FEEDING EXTRUDER=0 LOAD=1"));
+
+    // (a2) And WITHOUT PRINTING=1. FEED_AUTO silent-returns ("LOAD skipped:
+    // channel[N] is_printing=1") when that flag is set and the port sensor reads
+    // no filament, which is the state a runout leaves behind and the state this
+    // function runs in. do_load_filament() omits it for the same reason.
+    REQUIRE_FALSE(any_script_contains(hist, "PRINTING"));
 
     // (b) None of the old hand-rolled chain pieces survive — the sensor is NOT
     // disabled (that silently neutered FEED_AUTO), config is NOT re-asserted

@@ -683,6 +683,12 @@ AmsError AmsBackendSnapmaker::do_change_tool(int tool_number) {
     return execute_gcode(fmt::format("T{}", tool_number));
 }
 
+AmsError AmsBackendSnapmaker::do_park_toolhead() {
+    // Bare and parameterless: the firmware parks whichever head is on the
+    // carriage. Nothing to unload, since a docked head keeps its filament.
+    return execute_gcode("PARK_EXTRUDER");
+}
+
 // ============================================================================
 // Recovery (not supported)
 // ============================================================================
@@ -824,7 +830,11 @@ void AmsBackendSnapmaker::prepare_for_resume(int slot_index, ResumeReadyCallback
         return;
     }
 
-    std::string chain = fmt::format("AUTO_FEEDING EXTRUDER={0} LOAD=1 PRINTING=1", slot);
+    // No PRINTING=1, for the same reason do_load_filament() omits it: FEED_AUTO
+    // silent-returns ("LOAD skipped: channel[N] is_printing=1") when PRINTING is
+    // set and the port sensor reads no filament, which is the state a runout
+    // leaves behind and the only state this branch runs in.
+    std::string chain = fmt::format("AUTO_FEEDING EXTRUDER={0} LOAD=1", slot);
     spdlog::info("{} prepare_for_resume: tool {} runout latched — driving AMS load "
                  "(AUTO_FEEDING) before RESUME",
                  backend_log_tag(), slot);
@@ -1220,17 +1230,27 @@ void AmsBackendSnapmaker::apply_active_tool_locked(const snapmaker::StatusDelta&
     // update when we have actual evidence: incremental status updates may omit
     // extruder/toolhead keys, so preserve the current value when no relevant
     // data is present (prevents oscillation between valid and -1).
-    bool has_extruder_data = false;
+    //
+    // The per-extruder pins are authoritative, and "every one PARKED" is an
+    // answer rather than an absence of one: the carriage is empty, which is
+    // what MountState::NONE expresses. toolhead.extruder cannot say that.
+    // Klipper always names some extruder there, so it elects a parked tool
+    // whenever nothing is mounted. It decides only while no extruder object
+    // has been seen.
+    bool has_pin_data = false;
     int active = -1;
     for (int i = 0; i < NUM_TOOLS; i++) {
-        if (extruder_states_[i].active_pin ||
-            (!extruder_states_[i].state.empty() && extruder_states_[i].state != "PARKED")) {
+        const auto& st = extruder_states_[i];
+        if (st.active_pin || st.park_pin || !st.state.empty()) {
+            has_pin_data = true;
+        }
+        if (st.active_pin || (!st.state.empty() && st.state != "PARKED")) {
             active = i;
-            has_extruder_data = true;
             break;
         }
     }
-    if (delta.toolhead_extruder) {
+    bool has_extruder_data = has_pin_data;
+    if (!has_pin_data && delta.toolhead_extruder) {
         // "extruder" = 0, "extruder1" = 1, etc. An unparseable name leaves
         // whatever the per-extruder state decided above.
         if (const auto tool_number = helix::tool_number_for_extruder(*delta.toolhead_extruder)) {
@@ -1251,6 +1271,8 @@ void AmsBackendSnapmaker::apply_active_tool_locked(const snapmaker::StatusDelta&
         // latch and the toolhead switch.
         system_info_.current_tool = active;
         system_info_.current_slot = active; // 1:1 tool-to-slot on Snapmaker
+        system_info_.mount_state = (active >= 0) ? MountState::MOUNTED : MountState::NONE;
+        system_info_.mounted_tool = active;
         fx.changed = true;
     }
 }
@@ -1425,6 +1447,10 @@ void AmsBackendSnapmaker::apply_feed_channels_locked(const snapmaker::StatusDelt
     for (const auto& channel : delta.feed_channels) {
         apply_feed_channel_locked(channel, fx);
     }
+    if (fx.step_phase_seen && system_info_.operation_phase != fx.step_phase) {
+        system_info_.operation_phase = fx.step_phase;
+        fx.changed = true;
+    }
 }
 
 void AmsBackendSnapmaker::apply_feed_channel_locked(const snapmaker::FeedChannelDelta& channel,
@@ -1486,7 +1512,11 @@ void AmsBackendSnapmaker::apply_feed_channel_locked(const snapmaker::FeedChannel
     const ChannelStateInfo info = classify_channel_state(state);
     const std::string& op_state = settled_outcome ? *settled_outcome : state;
     ChannelStateInfo op_info = settled_outcome ? classify_channel_state(op_state) : info;
-    if (!settled_outcome && state == "preload_finish" && preload_in_flight_[i]) {
+    // preload_finish ends a preload, and ends an unload on a head whose
+    // retract the feeder does not perform (no unload_finish follows it).
+    if (!settled_outcome && state == "preload_finish" &&
+        (preload_in_flight_[i] ||
+         (system_info_.action == AmsAction::UNLOADING && preload_finish_ends_unload(i)))) {
         op_info.is_terminal = true;
     }
     if (helix::snapmaker::channel_state_in_progress(state)) {
@@ -1584,17 +1614,20 @@ void AmsBackendSnapmaker::apply_channel_progress_locked(int i, const std::string
         feed_presence_seen_[i] = true;
     }
 
-    // Mirror the granular firmware sub-phase into the system
-    // info so the sidebar step bar can show the real
+    // Mirror the granular firmware sub-phase into the frame's
+    // election so the sidebar step bar can show the real
     // Home/Select/Heat/Move sequence. -1 for any non-active
-    // state (idle, *_finish, *_fail, preload_finish). Updated
+    // state (idle, *_finish, *_fail, preload_finish). Recorded
     // only when the firmware actually reports a channel_state,
     // so an incremental status omitting it doesn't clear the
-    // phase spuriously.
+    // phase spuriously. One head operates at a time, so the
+    // first channel reporting an active step is the frame's
+    // answer; apply_feed_channels_locked() publishes it.
     if (!state.empty()) {
-        if (system_info_.operation_phase != info.phase) {
-            system_info_.operation_phase = info.phase;
-            fx.changed = true;
+        fx.step_phase_seen = true;
+        const int phase = step_phase_locked(i, info);
+        if (phase >= 0 && fx.step_phase < 0) {
+            fx.step_phase = phase;
         }
     }
 
@@ -1697,8 +1730,13 @@ void AmsBackendSnapmaker::apply_channel_outcome_locked(int i, const std::string&
                 // lock before ours (AmsBackendRegistry).
                 fx.unloaded_lanes.push_back(i);
             }
-            if (outcome_is_new && (system_info_.action == AmsAction::LOADING ||
-                                   system_info_.action == AmsAction::UNLOADING)) {
+            // An unload that is the first half of a queued swap leaves the
+            // action standing: the load half is the same operation.
+            const bool swap_boundary =
+                system_info_.action == AmsAction::UNLOADING && unload_continues_into_load(i);
+            if (outcome_is_new && !swap_boundary &&
+                (system_info_.action == AmsAction::LOADING ||
+                 system_info_.action == AmsAction::UNLOADING)) {
                 system_info_.action = AmsAction::IDLE;
                 system_info_.operation_detail.clear();
                 PostOpCooldownManager::instance().schedule();

@@ -140,6 +140,9 @@ class AmsEnvironmentOverlay : public OverlayBase {
     /// Start or stop drying on the shown zone's unit.
     void handle_start_stop();
 
+    /// Arm or disarm humidity-controlled drying on the shown zone's unit.
+    static void on_auto_dry_toggled(lv_event_t* e);
+
     /// Which of the two dryer inputs a keypad session is filling.
     enum class DryerField { Temperature, Duration };
 
@@ -245,6 +248,13 @@ class AmsEnvironmentOverlay : public OverlayBase {
     lv_subject_t preset_text_subject_{};
     char preset_text_buf_[64] = {};
 
+    /// Humidity-controlled drying. A separate capability from the dryer itself —
+    /// a backend can have one without the other — so it carries its own
+    /// visibility rather than riding on dryer_visible_subject_.
+    lv_subject_t auto_dry_visible_subject_{};
+    lv_subject_t auto_dry_on_subject_{};
+    lv_subject_t auto_dry_text_subject_{};
+    char auto_dry_text_buf_[96] = {};
     /// Zone selector + per-zone ceiling. "env_zone_" prefix; the pools are
     /// distinct from Task 7's overview overlay, which uses "zone_ov_".
     lv_subject_t zone_count_subject_{};
