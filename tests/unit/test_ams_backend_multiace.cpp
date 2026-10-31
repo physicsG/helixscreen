@@ -478,6 +478,52 @@ TEST_CASE_METHOD(MultiAceFixture, "load bay emits ACE and SLOT always", "[multia
     }
 }
 
+TEST_CASE_METHOD(MultiAceFixture, "a bay swap runs on one bar", "[multiace]") {
+    CapturingMultiAce b;
+    b.frame(ace_frame("head_mode_4ace.json"));
+    b.frame(json{{"toolhead", {{"extruder", "extruder"}}}});
+    // Head 0 holds ACE 1 bay 1; loading bay 2 is a swap.
+    REQUIRE(b.load_filament(multiace::bay_global(0, 1)).success());
+    const auto model = b.get_operation_step_model(StepOperationType::LOAD_FRESH);
+    REQUIRE(model.steps.size() == 7);
+    CHECK(model.steps[3].label == "Retract");
+    CHECK(model.steps[4].label == "Feed filament");
+    b.answer_ok();
+
+    const auto phase = [&b] { return b.get_system_info().operation_phase; };
+    const auto action = [&b] { return b.get_system_info().action; };
+    // The unload half lands on the bar's first four steps.
+    b.frame(feed_frame(0, "unload_heating"));
+    CHECK(phase() == 2);
+    CHECK(action() == AmsAction::HEATING);
+    b.frame(feed_frame(0, "unload_doing"));
+    CHECK(phase() == 3);
+    CHECK(action() == AmsAction::UNLOADING);
+    // Between the halves the bar holds on the retract.
+    json emptied = {{"ace", {{"head_source", {{"2", {{"ace_index", 2}, {"slot", 3}}}}}}}};
+    emptied.update(feed_frame(0, "preload_finish"));
+    b.frame(emptied);
+    REQUIRE(b.sent.size() == 2);
+    CHECK(phase() == 3);
+    CHECK(b.running_step_operation() == std::optional<StepOperationType>{StepOperationType::LOAD_FRESH});
+    // The load half skips its own Home / Select / Heat.
+    b.frame(feed_frame(0, "load_picking"));
+    CHECK(phase() == 3);
+    b.frame(feed_frame(0, "load_feeding"));
+    CHECK(phase() == 4);
+    CHECK(action() == AmsAction::LOADING);
+    b.frame(feed_frame(0, "load_extruding"));
+    CHECK(phase() == 5);
+    b.frame(feed_frame(0, "load_flushing"));
+    CHECK(phase() == 6);
+    CHECK(action() == AmsAction::PURGING);
+    // Once the load half ends the swap is over: the U1's own steps again.
+    b.frame(feed_frame(0, "load_finish"));
+    CHECK_FALSE(b.running_step_operation().has_value());
+    b.frame(feed_frame(0, "load_feeding"));
+    CHECK(phase() == 2);
+}
+
 TEST_CASE_METHOD(MultiAceFixture, "load into an occupied head unloads first", "[multiace]") {
     CapturingMultiAce b;
     b.frame(ace_frame("head_mode_4ace.json"));
@@ -1126,6 +1172,55 @@ TEST_CASE_METHOD(MultiAceFixture, "a routed head's spool lives in its bay", "[mu
     // Without the engine contract there are no bays to be upstream.
     CapturingMultiAce plain;
     CHECK_FALSE(plain.upstream_slot(0).has_value());
+    CHECK_FALSE(plain.lane_spool_is_upstream(0));
+}
+
+TEST_CASE_METHOD(MultiAceFixture, "an unrouted ACE-fed head holds no spool of its own",
+                 "[multiace]") {
+    CapturingMultiAce b;
+    b.frame(ace_frame("head_mode_4ace.json"));
+
+    // Head 1 is ACE-fed with no bay routed: no upstream lane to name, and still
+    // not a spool of its own.
+    REQUIRE_FALSE(b.upstream_slot(1).has_value());
+    CHECK(b.lane_spool_is_upstream(1));
+    CHECK(b.lane_spool_is_upstream(0));
+    CHECK_FALSE(b.lane_spool_is_upstream(multiace::bay_global(0, 0)));
+
+    // The same head fed by its own feeder is a spool again.
+    json ace = ace_frame("head_mode_4ace.json");
+    ace["ace"]["head_feeder"]["1"] = true;
+    b.frame(ace);
+    CHECK_FALSE(b.lane_spool_is_upstream(1));
+    CHECK(b.spool_display_number(1) > 0);
+}
+
+TEST_CASE_METHOD(MultiAceFixture, "multiACE's own bay description replaces the lane's",
+                 "[multiace]") {
+    CapturingMultiAce b;
+    json ace = ace_frame("head_mode_4ace.json");
+    // ACE 2 bay 1 reads red Anycubic PLA from its slot; multiACE binds a spool.
+    ace["ace"]["spools"] = json::parse(R"({"25": {"spoolman_id": "15", "material": "PETG",
+        "vendor": "Kingroon", "color": "83AFFF", "label": "Silver"}})");
+    ace["ace"]["spool_binding"] = json::parse(R"({"1_0": "25"})");
+    b.frame(ace);
+
+    const SlotInfo bay = b.get_slot_info(multiace::bay_global(1, 0));
+    CHECK(bay.material == "PETG");
+    CHECK(bay.brand == "Kingroon");
+    CHECK(bay.spool_name == "Silver");
+    CHECK(bay.color_rgb == 0x83AFFF);
+    CHECK(bay.spoolman_id == 15);
+
+    // Unbinding deletes the key; the binding arrives whole and the bay reads
+    // its slot again.
+    json unbound;
+    unbound["ace"]["spool_binding"] = json::object();
+    b.frame(unbound);
+    const SlotInfo after = b.get_slot_info(multiace::bay_global(1, 0));
+    CHECK(after.material == "PLA");
+    CHECK(after.color_rgb == 0xFF0000);
+    CHECK(after.spoolman_id == 0);
 }
 
 TEST_CASE_METHOD(MultiAceFixture, "a head's consumption lands on the bay feeding it",
@@ -1159,20 +1254,24 @@ TEST_CASE_METHOD(MultiAceFixture, "spool numbering counts a routed bay once", "[
     CapturingMultiAce b;
     b.frame(ace_frame("head_mode_4ace.json"));
 
-    // A routed head wears its bay's number.
+    // Every head is ACE-fed. A routed head wears its bay's number; an unrouted
+    // one holds no spool of its own and has none.
     CHECK(b.spool_display_number(0) == b.spool_display_number(multiace::bay_global(0, 0)));
     CHECK(b.spool_display_number(2) == b.spool_display_number(multiace::bay_global(2, 3)));
+    CHECK(b.spool_display_number(1) == 0);
+    CHECK(b.spool_display_number(3) == 0);
 
-    // Lanes that hold their own spool number 1..N with no gaps or repeats.
+    // Lanes that hold their own spool, the sixteen bays, number 1..N with no
+    // gaps or repeats.
     std::set<int> numbers;
     for (int gi = 0; gi < b.get_system_info().total_slots; ++gi) {
-        if (b.upstream_slot(gi).has_value()) {
+        if (b.lane_spool_is_upstream(gi)) {
             continue;
         }
         INFO("slot " << gi);
         CHECK(numbers.insert(b.spool_display_number(gi)).second);
     }
-    CHECK(numbers == std::set<int>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
+    CHECK(numbers == std::set<int>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
 
     // A backend with no shared spools keeps the plain 1-based lane numbers.
     CapturingMultiAce plain;
@@ -1218,9 +1317,9 @@ TEST_CASE_METHOD(MultiAceFixture, "a route naming an absent unit reads as unrout
     CHECK(b.upstream_slot(0) == std::optional<int>{multiace::bay_global(0, 0)});
     CHECK(b.upstream_slot(2) == std::nullopt);
     CHECK(helix::ui::upstream_lane_caption(info, b, 2).empty());
-    // The absent unit's index range is not numbered as spools: ACE 2 bay 1 is
-    // the 8th spool-owning lane, not the 9th.
-    CHECK(b.spool_display_number(multiace::bay_global(1, 0)) == 8);
+    // The absent unit's index range is not numbered as spools, and no
+    // ACE-fed head owns one: ACE 2 bay 1 follows ACE 1's four bays as the 5th.
+    CHECK(b.spool_display_number(multiace::bay_global(1, 0)) == 5);
 }
 
 TEST_CASE_METHOD(MultiAceFixture, "spool numbers skip no index the engine left out", "[multiace]") {
@@ -1243,12 +1342,13 @@ TEST_CASE_METHOD(MultiAceFixture, "spool numbers skip no index the engine left o
     REQUIRE(info.units.size() == 4); // the heads plus the three units shown
     REQUIRE(info.total_slots == multiace::bay_global(3, 3) + 1);
 
-    // Every lane a unit covers, numbered: a routed head wears its bay's
-    // number, so the DISTINCT numbers over the covered lanes run 1..N with
-    // no skip where the missing unit's index range sits.
+    // Every lane a unit covers that holds a spool, numbered: a routed head
+    // wears its bay's number and an unrouted ACE-fed head has none (0), so the
+    // DISTINCT numbers run 1..N with no skip where the missing unit's index
+    // range sits.
     std::vector<int> numbers;
     for (int gi = 0; gi < info.total_slots; ++gi) {
-        if (info.get_slot_global(gi)) {
+        if (info.get_slot_global(gi) && b.spool_display_number(gi) > 0) {
             numbers.push_back(b.spool_display_number(gi));
         }
     }

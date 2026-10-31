@@ -3,6 +3,8 @@
 
 #include "ams_backend_multiace.h"
 
+#include "ams_state.h"
+
 #include "ace_slot_parse.h"
 #include "ams_fault_event.h"
 #include "klipper_extruder_naming.h"
@@ -176,6 +178,22 @@ void AmsBackendMultiAce::apply_extension_locked(const nlohmann::json& status, bo
     if (d.event_seq) {
         event_seq_ = *d.event_seq;
     }
+    if (event_seq_ != overrides_seq_) {
+        overrides_seq_ = event_seq_;
+        override_refetch_wanted_ = true;
+    }
+    const bool declarations_moved = d.spools || d.spool_binding;
+    if (d.spools && d.spools->is_object()) {
+        spools_ = *d.spools;
+    }
+    // Whole when present: unbinding deletes the key rather than nulling it.
+    if (d.spool_binding && d.spool_binding->is_object()) {
+        spool_binding_ = *d.spool_binding;
+    }
+    if (declarations_moved) {
+        declarations_ = multiace::merge_declarations(
+            multiace::bound_spools(spools_, spool_binding_), slot_overrides_);
+    }
 
     if (d.ace_heads && active_locked()) {
         // The engine's own list of ACE-driven heads, against ours from the
@@ -193,7 +211,7 @@ void AmsBackendMultiAce::apply_extension_locked(const nlohmann::json& status, bo
     }
 
     if (d.api_version || d.mode || d.head_ace || d.head_feeder || d.head_manual || d.head_source ||
-        d.aces) {
+        d.aces || declarations_moved) {
         rebuild_units_locked();
         changed = true;
     }
@@ -207,6 +225,51 @@ void AmsBackendMultiAce::apply_extension_locked(const nlohmann::json& status, bo
         pending_load_failed_errors_.push_back(AmsErrorHelper::position_label(tool_noun(), h) +
                                               ": " + lv_tr("Load failed"));
     }
+}
+
+void AmsBackendMultiAce::fetch_slot_overrides() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (override_fetch_in_flight_ || !api_) {
+            return; // the want flag stays set; the reply re-asks
+        }
+        override_fetch_in_flight_ = true;
+        override_refetch_wanted_ = false;
+    }
+    auto token = lifetime_.token();
+    const auto finish = [this](std::optional<multiace::BayDeclarations> parsed) {
+        bool again = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            override_fetch_in_flight_ = false;
+            again = override_refetch_wanted_;
+            if (parsed) {
+                slot_overrides_ = std::move(*parsed);
+                declarations_ = multiace::merge_declarations(
+                    multiace::bound_spools(spools_, spool_binding_), slot_overrides_);
+                rebuild_units_locked();
+            }
+        }
+        if (parsed) {
+            emit_event(EVENT_STATE_CHANGED);
+        }
+        if (again) {
+            fetch_slot_overrides();
+        }
+    };
+    api_->transfers().download_file(
+        "config", "extended/multiace/slot_overrides.json",
+        [token, finish](const std::string& content) {
+            auto parsed = multiace::parse_slot_overrides(content);
+            token.defer("AmsBackendMultiAce::slot_overrides",
+                        [finish, parsed = std::move(parsed)]() mutable { finish(std::move(parsed)); });
+        },
+        [token, finish](const MoonrakerError& error) {
+            // Absent on an install whose web UI never wrote one.
+            spdlog::debug("[AMS multiACE] slot_overrides.json unavailable: {}", error.message);
+            token.defer("AmsBackendMultiAce::slot_overrides_failed",
+                        [finish]() { finish(std::nullopt); });
+        });
 }
 
 void AmsBackendMultiAce::rebuild_units_locked() {
@@ -304,6 +367,24 @@ void AmsBackendMultiAce::rebuild_units_locked() {
                 }
                 helix::ams::ingest(lane_id(slot.global_index), engine);
                 apply_resolved_lane(slot, slot.global_index);
+                // multiACE's own statement replaces the lane's identity whole:
+                // its web UI is where the bay was described, and a stale local
+                // edit must not mask it or lend it a spool name or a Spoolman
+                // link (whose weights would then describe another spool).
+                if (const auto dec = declarations_.find({u.idx, s}); dec != declarations_.end()) {
+                    const multiace::BayDeclaration& bay_dec = dec->second;
+                    slot.material = bay_dec.material;
+                    slot.brand = bay_dec.brand;
+                    slot.spool_name = bay_dec.spool_name;
+                    if (bay_dec.color) {
+                        slot.color_rgb = *bay_dec.color;
+                    }
+                    if (slot.spoolman_id != bay_dec.spoolman_id) {
+                        slot.spoolman_id = bay_dec.spoolman_id;
+                        slot.remaining_weight_g = -1.0f;
+                        slot.total_weight_g = -1.0f;
+                    }
+                }
                 if (const auto ovr = overrides_.find(slot.global_index); ovr != overrides_.end()) {
                     const ams::ResolvedTemps temps = ams::resolved_temps(ovr->second);
                     if (temps.nozzle_temp > 0) {
@@ -337,6 +418,140 @@ bool AmsBackendMultiAce::resume_may_refeed_locked(int head) const {
     // firmware's load, which the engine is not known to honour mid-print.
     (void)head;
     return !active_locked();
+}
+
+namespace {
+
+// The swap bar: the unload half's four steps in the U1 unload model's own
+// order, then the load half without its Home / Select / Heat, which pass
+// straight through on a head that is already picked and hot.
+constexpr int kSwapStepRetract = 3;
+constexpr int kSwapStepFeed = 4;
+constexpr int kSwapStepExtrude = 5;
+constexpr int kSwapStepPurge = 6;
+constexpr std::array kSwapStepActions{AmsAction::UNLOADING, AmsAction::UNLOADING,
+                                      AmsAction::HEATING,   AmsAction::UNLOADING,
+                                      AmsAction::LOADING,   AmsAction::LOADING,
+                                      AmsAction::PURGING};
+
+// classify_channel_state()'s load-direction indices.
+constexpr int kLoadPhaseFeed = 2;
+constexpr int kLoadPhaseHeat = 3;
+constexpr int kLoadPhaseExtrude = 4;
+constexpr int kLoadPhasePurge = 5;
+
+} // namespace
+
+AmsBackend::OperationStepModel
+AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
+    bool swap = false;
+    if (op != StepOperationType::UNLOAD) {
+        // The model is asked for before the load goes out, so a swap not yet
+        // dispatched is read off the head it will run on: an ACE-fed head the
+        // engine records a bay in. The sidebar names the lane it is loading
+        // just before it asks (main thread, as is this call).
+        const int target = lv_subject_get_int(AmsState::instance().get_pending_target_slot_subject());
+        std::lock_guard<std::mutex> lock(mutex_);
+        int head = system_info_.current_tool;
+        if (swap_head_ >= 0) {
+            head = swap_head_;
+        } else if (target >= kHeads) {
+            head = head_for_global_locked(target).value_or(-1);
+        } else if (target >= 0) {
+            head = target;
+        }
+        swap = swap_head_ >= 0 || (head >= 0 && head < kHeads && ace_fed_locked(head) &&
+                                   head_source_[static_cast<size_t>(head)].has_value());
+    }
+    if (!swap) {
+        return AmsBackendSnapmaker::get_operation_step_model(op);
+    }
+    OperationStepModel model;
+    model.steps.push_back({lv_tr("Home"), 0});
+    model.steps.push_back({lv_tr("Select"), 1});
+    model.steps.push_back({lv_tr("Heat nozzle"), 2, false, /*live_temp=*/true});
+    model.steps.push_back({lv_tr("Retract"), kSwapStepRetract});
+    model.steps.push_back({lv_tr("Feed filament"), kSwapStepFeed});
+    model.steps.push_back({lv_tr("Extrude"), kSwapStepExtrude});
+    model.steps.push_back({lv_tr("Purge"), kSwapStepPurge});
+    for (size_t i = 0; i < model.steps.size(); ++i) {
+        model.steps[i].coarse = kSwapStepActions[i];
+    }
+    return model;
+}
+
+std::optional<StepOperationType> AmsBackendMultiAce::running_step_operation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (swap_head_ >= 0) {
+        return StepOperationType::LOAD_FRESH;
+    }
+    return std::nullopt;
+}
+
+int AmsBackendMultiAce::step_phase_locked(int head, const snapmaker::ChannelStateInfo& info) const {
+    if (swap_head_ < 0 || head != swap_head_) {
+        return AmsBackendSnapmaker::step_phase_locked(head, info);
+    }
+    if (info.action == AmsAction::UNLOADING) {
+        return info.phase; // the unload half is the bar's first four steps
+    }
+    if (info.action == AmsAction::LOADING) {
+        switch (info.phase) {
+        case kLoadPhaseFeed:
+        case kLoadPhaseHeat: // already hot: the bar has no second heat step
+            return kSwapStepFeed;
+        case kLoadPhaseExtrude:
+            return kSwapStepExtrude;
+        case kLoadPhasePurge:
+            return kSwapStepPurge;
+        default: // the load half's Home / Select
+            return kSwapStepRetract;
+        }
+    }
+    // Resting between the halves holds the bar on the retract.
+    if (!info.is_fail && swap_progress_seen_ && !swap_load_half_started_) {
+        return kSwapStepRetract;
+    }
+    return -1;
+}
+
+std::optional<AmsAction> AmsBackendMultiAce::step_action_locked() const {
+    if (swap_head_ < 0) {
+        return AmsBackendSnapmaker::step_action_locked();
+    }
+    const int phase = system_info_.operation_phase;
+    if (phase < 0 || phase >= static_cast<int>(kSwapStepActions.size())) {
+        return std::nullopt;
+    }
+    return kSwapStepActions[static_cast<size_t>(phase)];
+}
+
+void AmsBackendMultiAce::track_swap_locked() {
+    if (swap_head_ < 0) {
+        return;
+    }
+    const AmsAction action = system_info_.action;
+    const bool running = action == AmsAction::LOADING || action == AmsAction::UNLOADING;
+    if (running) {
+        swap_progress_seen_ = true;
+    }
+    if (action == AmsAction::LOADING && swap_load_sent_) {
+        swap_load_half_started_ = true;
+    }
+    const bool resting = action == AmsAction::IDLE || action == AmsAction::ERROR;
+    // Over once the load half has run, on any error, or when the load was
+    // dropped before it went out.
+    if ((resting && swap_load_half_started_) || action == AmsAction::ERROR ||
+        (resting && swap_progress_seen_ && !pending_load_ && !swap_load_sent_)) {
+        end_swap_locked();
+    }
+}
+
+void AmsBackendMultiAce::end_swap_locked() {
+    swap_head_ = -1;
+    swap_progress_seen_ = false;
+    swap_load_sent_ = false;
+    swap_load_half_started_ = false;
 }
 
 bool AmsBackendMultiAce::preload_finish_ends_unload_locked(int head) const {
@@ -534,22 +749,29 @@ std::optional<int> AmsBackendMultiAce::upstream_slot(int slot_index) const {
     return multiace::bay_global(bay->first, bay->second);
 }
 
+bool AmsBackendMultiAce::lane_spool_is_upstream(int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return slot_index >= 0 && slot_index < kHeads && ace_fed_locked(slot_index);
+}
+
 int AmsBackendMultiAce::spool_display_number(int slot_index) const {
     if (slot_index < 0) {
         return slot_index + 1;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    // A routed head aliases its bay; every other lane (bays, unrouted heads)
-    // numbers in global order, so the numbers on spool-owning lanes run 1..N.
-    // Only indices a unit actually covers count: a gap the engine left in the
-    // ace numbering is not a spool, so the numbers stay consecutive.
-    const auto aliased = [this](int head) {
-        return head < kHeads && ace_fed_locked(head) && routed_bay_locked(head).has_value();
-    };
+    // An ACE-fed head holds no spool of its own: routed, it wears its bay's
+    // number; unrouted, it has none. Every other lane numbers in global order,
+    // so the numbers on spool-owning lanes run 1..N. Only indices a unit
+    // actually covers count: a gap the engine left in the ace numbering is not
+    // a spool, so the numbers stay consecutive.
+    const auto aliased = [this](int head) { return head < kHeads && ace_fed_locked(head); };
     int target = slot_index;
     if (aliased(slot_index)) {
-        const auto bay = *routed_bay_locked(slot_index);
-        target = multiace::bay_global(bay.first, bay.second);
+        const auto bay = routed_bay_locked(slot_index);
+        if (!bay) {
+            return 0;
+        }
+        target = multiace::bay_global(bay->first, bay->second);
     }
     int n = 0;
     for (int gi = 0; gi < system_info_.total_slots; ++gi) {
@@ -752,6 +974,8 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
         pending.bay = *bay;
         pending.id = id;
         pending_load_ = pending;
+        end_swap_locked();
+        swap_head_ = head;
     }
     const auto answered = [this, id] {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -771,6 +995,7 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
                                      std::lock_guard<std::mutex> lock(mutex_);
                                      if (pending_load_ && pending_load_->id == id) {
                                          pending_load_.reset();
+                                         end_swap_locked();
                                      }
                                  }
                                  emit_event(kEventError, e.message);
@@ -779,6 +1004,7 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (pending_load_ && pending_load_->id == id) {
             pending_load_.reset();
+            end_swap_locked();
         }
     }
     return err;
@@ -787,9 +1013,15 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
 void AmsBackendMultiAce::handle_status(const nlohmann::json& status) {
     AmsBackendSnapmaker::handle_status(status);
     std::vector<std::string> load_failed;
+    bool want_overrides = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         load_failed.swap(pending_load_failed_errors_);
+        want_overrides = override_refetch_wanted_ && active_locked();
+        track_swap_locked();
+    }
+    if (want_overrides) {
+        fetch_slot_overrides();
     }
     for (const std::string& message : load_failed) {
         emit_event(kEventError, message);
@@ -809,6 +1041,7 @@ void AmsBackendMultiAce::cancel_pending_load(const char* why) {
                      pending_load_->bay.first + 1, pending_load_->bay.second + 1,
                      pending_load_->head + 1, why);
         pending_load_.reset();
+        end_swap_locked();
     }
 }
 
@@ -850,6 +1083,11 @@ void AmsBackendMultiAce::advance_pending_load() {
             return;
         }
         pending_load_.reset();
+        if (send) {
+            swap_load_sent_ = true;
+        } else {
+            end_swap_locked();
+        }
     }
     if (send) {
         // A print that took the heads while the unload ran owns them now.
@@ -858,6 +1096,10 @@ void AmsBackendMultiAce::advance_pending_load() {
         }
     }
     if (!dropped.empty()) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            end_swap_locked();
+        }
         spdlog::warn("{} Not loading ACE {} bay {} into head {}: {}", backend_log_tag(),
                      pending.bay.first + 1, pending.bay.second + 1, pending.head + 1, dropped);
         emit_event(kEventError,

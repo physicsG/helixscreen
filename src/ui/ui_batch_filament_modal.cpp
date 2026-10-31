@@ -106,7 +106,10 @@ bool BatchFilamentModal::show_owned(HeadPickOp op, Confirm on_confirm) {
     if (!modal->show(lv_screen_active())) {
         return false; // the unique_ptr frees the never-shown instance
     }
-    ModalStack::instance().assume_ownership(modal->backdrop(), std::move(modal));
+    // Read the backdrop before the move: argument evaluation order is
+    // unspecified, and GCC moves the unique_ptr out first.
+    lv_obj_t* backdrop = modal->backdrop();
+    ModalStack::instance().assume_ownership(backdrop, std::move(modal));
     return true;
 }
 

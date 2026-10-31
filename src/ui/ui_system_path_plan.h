@@ -84,6 +84,13 @@ struct SystemPathData {
     int current_tool = -1;                   // Virtual tool number (slot-based, for label)
     int tool_virtual_number[kMaxTools] = {}; // Virtual tool labels per physical nozzle
     bool has_virtual_numbers = false;        // When false, raw physical index is used for labels
+    // Per unit, the physical nozzles it draws no lane to (bit = nozzle index):
+    // a lane whose spool lives upstream reaches its nozzle through that
+    // upstream unit's path, not its own.
+    uint32_t unit_skip_tool_mask[kMaxUnits] = {};
+    // Taps on the toolhead row, reported as the physical nozzle index.
+    void (*toolhead_callback)(int nozzle_index, void* user_data) = nullptr;
+    void* toolhead_user_data = nullptr;
     // Letter in front of every toolhead badge number. 'T' = AFC lane alias (the
     // legacy default), 'E' = Klipper extruder identity. See #1229: the two
     // numbering systems disagree, so the letter says which one is on screen.

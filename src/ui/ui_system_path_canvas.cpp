@@ -311,6 +311,46 @@ static void system_path_draw_cb(lv_event_t* e) {
 // Bypass spool clicks are handled by the BypassSpoolWidgets overlay the panel
 // places on top of this canvas — see ui_bypass_spool_widget.h.
 
+// Toolhead row hit-test. Reads its geometry from the same compute_sys_layout()
+// and calc_tool_x() the draw pass uses, so a tap lands on the nozzle that was
+// painted.
+static void system_path_click_cb(lv_event_t* e) {
+    lv_obj_t* obj = lv_event_get_target_obj(e);
+    auto* data = get_data(obj);
+    if (!data || !data->toolhead_callback || data->total_tools <= 0) {
+        return;
+    }
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev) {
+        return;
+    }
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+
+    lv_area_t coords;
+    lv_obj_get_coords(obj, &coords);
+    const SysLayout L = compute_sys_layout(*data, coords);
+    if (!L.multi_tool) {
+        return;
+    }
+
+    // A generous band around the nozzle glyph and its badge, the whole thing a
+    // finger aims at.
+    const int32_t band = LV_MAX(18, L.height / 5);
+    if (p.y < L.tools_y - band || p.y > L.tools_y + band) {
+        return;
+    }
+    for (int t = 0; t < data->total_tools; ++t) {
+        const int32_t tx = calc_tool_x(t, data->total_tools, L.x_off, L.width);
+        const int32_t half = LV_MAX(16, L.width / (data->total_tools * 2 + 1));
+        if (helix::ui::hub_box_hit(p, tx, L.tools_y, half * 2, band * 2, 0)) {
+            spdlog::debug("[SystemPath] Toolhead at nozzle {} tapped", t);
+            data->toolhead_callback(t, data->toolhead_user_data);
+            return;
+        }
+    }
+}
+
 static void system_path_delete_cb(lv_event_t* e) {
     lv_obj_t* obj = lv_event_get_target_obj(e);
     if (SystemPathData* registered = s_registry.take(obj)) {
@@ -349,8 +389,11 @@ static void* system_path_xml_create(lv_xml_parser_state_t* state, const char** a
     // Register event handlers
     lv_obj_add_event_cb(obj, system_path_draw_cb, LV_EVENT_DRAW_POST, nullptr);
     lv_obj_add_event_cb(obj, system_path_delete_cb, LV_EVENT_DELETE, nullptr);
-    // Click handling on the canvas is no longer needed — bypass clicks are
-    // captured by the BypassSpoolWidgets overlay the panel places on top.
+    // Bypass clicks are captured by the BypassSpoolWidgets overlay the panel
+    // places on top; this one is for the toolhead row and does nothing until a
+    // panel sets a toolhead callback.
+    // DECLARATIVE_OK: hit-test on a procedurally drawn canvas
+    lv_obj_add_event_cb(obj, system_path_click_cb, LV_EVENT_CLICKED, nullptr);
 
     spdlog::debug("[SystemPath] Created widget via XML");
     return obj;
@@ -433,8 +476,11 @@ lv_obj_t* ui_system_path_canvas_create(lv_obj_t* parent) {
     // Register event handlers
     lv_obj_add_event_cb(obj, system_path_draw_cb, LV_EVENT_DRAW_POST, nullptr);
     lv_obj_add_event_cb(obj, system_path_delete_cb, LV_EVENT_DELETE, nullptr);
-    // Click handling on the canvas is no longer needed — bypass clicks are
-    // captured by the BypassSpoolWidgets overlay the panel places on top.
+    // Bypass clicks are captured by the BypassSpoolWidgets overlay the panel
+    // places on top; this one is for the toolhead row and does nothing until a
+    // panel sets a toolhead callback.
+    // DECLARATIVE_OK: hit-test on a procedurally drawn canvas
+    lv_obj_add_event_cb(obj, system_path_click_cb, LV_EVENT_CLICKED, nullptr);
 
     spdlog::debug("[SystemPath] Created widget programmatically");
     return obj;
@@ -562,6 +608,26 @@ void ui_system_path_canvas_set_unit_hub(lv_obj_t* obj, int unit_index, int hub_g
     lv_obj_invalidate(obj);
 }
 } // namespace helix::ui
+
+void ui_system_path_canvas_set_unit_skipped_tools(lv_obj_t* obj, int unit_index, uint32_t mask) {
+    auto* data = get_data(obj);
+    if (!data || unit_index < 0 || unit_index >= SystemPathData::kMaxUnits)
+        return;
+    if (data->unit_skip_tool_mask[unit_index] == mask)
+        return;
+    data->unit_skip_tool_mask[unit_index] = mask;
+    lv_obj_invalidate(obj);
+}
+
+void ui_system_path_canvas_set_toolhead_callback(lv_obj_t* obj,
+                                                 void (*cb)(int nozzle_index, void* user_data),
+                                                 void* user_data) {
+    auto* data = get_data(obj);
+    if (!data)
+        return;
+    data->toolhead_callback = cb;
+    data->toolhead_user_data = user_data;
+}
 
 void ui_system_path_canvas_set_toolhead_sensor(lv_obj_t* obj, bool has_toolhead_sensor) {
     auto* data = get_data(obj);

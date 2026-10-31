@@ -110,6 +110,34 @@ struct StatusDelta {
     std::optional<nlohmann::json> spools, spool_binding;
 };
 
+/// What multiACE itself states a bay holds: a spool bound from its spool
+/// table (`spools` + `spool_binding`), or an entry in its own
+/// `slot_overrides.json`. Empty fields state nothing.
+struct BayDeclaration {
+    std::string material, brand, spool_name;
+    std::optional<uint32_t> color;
+    int spoolman_id = 0;
+};
+
+/// Declarations keyed by (ace, bay).
+using BayDeclarations = std::map<std::pair<int, int>, BayDeclaration>;
+
+/// The spool bound to each bay: `spool_binding` maps "<ace>_<bay>" to a spool
+/// id, `spools` describes each id. A binding to an id the table does not
+/// describe declares nothing.
+[[nodiscard]] BayDeclarations bound_spools(const nlohmann::json& spools,
+                                           const nlohmann::json& spool_binding);
+
+/// multiACE's `slot_overrides.json`, keyed "<ace>_<bay>". Invalid JSON reads
+/// as no overrides.
+[[nodiscard]] BayDeclarations parse_slot_overrides(std::string_view content);
+
+/// @p overrides laid field by field over @p bound: multiACE's web UI resolves a
+/// bay from the override first, and only an override can describe a bay with
+/// no spool bound.
+[[nodiscard]] BayDeclarations merge_declarations(const BayDeclarations& bound,
+                                                 const BayDeclarations& overrides);
+
 /// One `multiace_event <name> key=val ... seq=<n>` line from the console.
 struct Event {
     std::string name;

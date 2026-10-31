@@ -210,6 +210,8 @@ int collect_parallel_mixed_routes(const SystemPathData& data, const SysLayout& L
         if (n >= SystemPathData::kMaxTools)
             break;
         int tool_idx = first_tool + t;
+        if (tool_idx < 32 && (data.unit_skip_tool_mask[i] & (1u << tool_idx)) != 0)
+            continue;
         int32_t tool_x = calc_tool_x(tool_idx, data.total_tools, L.x_off, L.width);
         int32_t start_x = start_x_of(t);
         int32_t dist = start_x > tool_x ? (start_x - tool_x) : (tool_x - start_x);

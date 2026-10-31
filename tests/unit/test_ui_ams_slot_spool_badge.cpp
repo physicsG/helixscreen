@@ -78,8 +78,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot badges renumber when routing chang
     ui_ams_slot_register();
 
     // Head 0 routed to ACE 1 bay 1 and head 2 to ACE 3 bay 4, as the fixture
-    // wires them. Badges before: the routed heads wear their bays' numbers;
-    // the spool-owning lanes number 1..18 in global order.
+    // wires them; every head is ACE-fed. Badges before: the routed heads wear
+    // their bays' numbers, the unrouted heads have none, and the bays number
+    // 1..16 in global order.
     backend->frame(ace_fixture());
     ams.sync_from_backend();
     process_lvgl(30);
@@ -92,22 +93,21 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot badges renumber when routing chang
     REQUIRE(bay0 != nullptr);
     process_lvgl(30);
 
-    CHECK(badge_text(head0) == "3"); // aliases bay (0,0): the third own-spooled lane
-    CHECK(badge_text(head1) == "1");
-    CHECK(badge_text(bay0) == "3");
+    CHECK(badge_text(head0) == "1"); // aliases bay (0,0), the first spool
+    CHECK(badge_text(head1) == "-");
+    CHECK(badge_text(bay0) == "1");
 
-    // Unroute head 0: its lane keeps a spool number of its own now, head 1's
-    // badge changes, and every lane from bay (0,0) onward shifts up by one -
-    // including bay (0,0), whose own status did not move.
+    // Unroute head 0: still ACE-fed, so it loses the bay's number and holds
+    // none of its own; the bays keep theirs.
     json unrouted = ace_fixture();
     unrouted["ace"]["head_source"]["0"] = nullptr;
     backend->frame(unrouted);
     ams.sync_from_backend();
     process_lvgl(30);
 
-    CHECK(badge_text(head0) == "1");
-    CHECK(badge_text(head1) == "2");
-    CHECK(badge_text(bay0) == "4");
+    CHECK(badge_text(head0) == "-");
+    CHECK(badge_text(head1) == "-");
+    CHECK(badge_text(bay0) == "1");
 
     lv_obj_delete(head0);
     lv_obj_delete(head1);

@@ -3542,8 +3542,11 @@ TEST_CASE_METHOD(SnapmakerFixture,
     const auto& hist = h.client.gcode_script_history();
 
     // (a) The single firmware load call was issued: AUTO_FEEDING with LOAD=1
-    // PRINTING=1 (#991) — homes, switches tool, feeds, heats, extrudes, flushes.
-    REQUIRE(any_script_contains(hist, "AUTO_FEEDING EXTRUDER=0 LOAD=1 PRINTING=1"));
+    // (#991) — homes, switches tool, feeds, heats, extrudes, flushes.
+    REQUIRE(any_script_contains(hist, "AUTO_FEEDING EXTRUDER=0 LOAD=1"));
+    // FEED_AUTO silent-returns under PRINTING=1 when the port sensor reads empty,
+    // which is the state a runout leaves behind.
+    REQUIRE_FALSE(any_script_contains(hist, "PRINTING=1"));
 
     // (b) None of the old hand-rolled chain pieces survive — the sensor is NOT
     // disabled (that silently neutered FEED_AUTO), config is NOT re-asserted
@@ -3678,7 +3681,7 @@ TEST_CASE_METHOD(SnapmakerFixture,
           "Toolhead 1 (T0) didn't load. Check that its hotend is seated and do a test extrude "
           "before resuming.");
     CHECK(count_containing(h.client.gcode_script_history(),
-                           "AUTO_FEEDING EXTRUDER=0 LOAD=1 PRINTING=1") == 1);
+                           "AUTO_FEEDING EXTRUDER=0 LOAD=1") == 1);
 }
 
 TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker resume proceeds once the feeder confirms the load",
@@ -3940,7 +3943,7 @@ TEST_CASE_METHOD(SnapmakerFixture,
         SnapmakerTestAccess::handle_status(h.backend, fed_head0("load_fail"));
         CHECK_FALSE(resume_once(h, 0).success());
         CHECK(count_containing(h.client.gcode_script_history(),
-                               "AUTO_FEEDING EXTRUDER=0 LOAD=1 PRINTING=1") == 1);
+                               "AUTO_FEEDING EXTRUDER=0 LOAD=1") == 1);
     }
     SECTION("load_finish with a live feed fault loads first") {
         SnapmakerTestAccess::handle_status(h.backend, fed_head0("load_finish", "feed_timeout"));
@@ -3986,7 +3989,7 @@ TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker resume after a paused manual load 
 
     CHECK_FALSE(resume_once(h, 0).success());
     CHECK(count_containing(h.client.gcode_script_history(),
-                           "AUTO_FEEDING EXTRUDER=0 LOAD=1 PRINTING=1") == 1);
+                           "AUTO_FEEDING EXTRUDER=0 LOAD=1") == 1);
 }
 
 // ============================================================================

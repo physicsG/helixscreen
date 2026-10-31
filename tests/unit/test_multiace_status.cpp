@@ -363,3 +363,58 @@ TEST_CASE("the other fixtures parse to their modes", "[multiace]") {
     CHECK(done.last_swap_result->status == "ok");
     CHECK((*done.head_source)[1]->slot == 2);
 }
+
+TEST_CASE("bound spools join each binding to its table entry", "[multiace]") {
+    const json spools = json::parse(R"({
+        "25": {"spoolman_id": "15", "material": "PETG", "vendor": "Kingroon",
+               "color": "83AFFF", "label": "Silver"},
+        "26": {"material": "PLA"}
+    })");
+    const json binding = json::parse(R"({"0_1": "25", "1_3": 26, "0_2": "99", "x_1": "25",
+                                         "0_4": "25"})");
+
+    const BayDeclarations bound = bound_spools(spools, binding);
+    // An id the table does not describe, a malformed key and a bay past the
+    // unit's four declare nothing.
+    REQUIRE(bound.size() == 2);
+    const BayDeclaration& silver = bound.at({0, 1});
+    CHECK(silver.material == "PETG");
+    CHECK(silver.brand == "Kingroon");
+    CHECK(silver.spool_name == "Silver");
+    CHECK(silver.color == std::optional<uint32_t>{0x83AFFF});
+    CHECK(silver.spoolman_id == 15);
+    const BayDeclaration& bare = bound.at({1, 3});
+    CHECK(bare.material == "PLA");
+    CHECK_FALSE(bare.color.has_value());
+    CHECK(bare.spoolman_id == 0);
+
+    CHECK(bound_spools(json::object(), binding).empty());
+}
+
+TEST_CASE("slot overrides read the file and outrank the bound spool", "[multiace]") {
+    const std::string file = R"({
+        "0_3": {"ace": 0, "slot": 3, "material": "PLA", "brand": "Jayo", "color": "#3B5759"},
+        "0_0": {"ace": 0, "slot": 0, "material": "PLA", "brand": "Generic", "color": "#FFFFDC"}
+    })";
+    const BayDeclarations ov = parse_slot_overrides(file);
+    REQUIRE(ov.size() == 2);
+    CHECK(ov.at({0, 3}).brand == "Jayo");
+    CHECK(ov.at({0, 3}).color == std::optional<uint32_t>{0x3B5759});
+
+    // The web API's {"overrides": {...}} wrapper reads the same.
+    const BayDeclarations wrapped = parse_slot_overrides(R"({"overrides": )" + file + "}");
+    CHECK(wrapped.size() == 2);
+    CHECK(parse_slot_overrides("not json").empty());
+
+    BayDeclarations bound;
+    bound[{0, 3}] = BayDeclaration{"PETG", "Kingroon", "Gray", 0x8FA7C8, 10};
+    const BayDeclarations merged = merge_declarations(bound, ov);
+    const BayDeclaration& bay = merged.at({0, 3});
+    CHECK(bay.material == "PLA");
+    CHECK(bay.brand == "Jayo");
+    CHECK(bay.color == std::optional<uint32_t>{0x3B5759});
+    // What the override does not state stays the bound spool's.
+    CHECK(bay.spool_name == "Gray");
+    CHECK(bay.spoolman_id == 10);
+    CHECK(merged.at({0, 0}).brand == "Generic");
+}

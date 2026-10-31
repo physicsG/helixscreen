@@ -159,6 +159,33 @@ void ui_system_path_canvas_set_unit_hub_sensor(lv_obj_t* obj, int unit_index, bo
 void ui_system_path_canvas_set_toolhead_sensor(lv_obj_t* obj, bool has_toolhead_sensor);
 
 /**
+ * @brief Set the physical nozzles a unit draws no lane to
+ *
+ * A lane whose spool lives upstream reaches its nozzle through the upstream
+ * unit's path, so its own unit draws nothing to it.
+ *
+ * @param obj The system_path_canvas widget
+ * @param unit_index Unit index
+ * @param mask Bit n set: no lane from this unit to physical nozzle n
+ */
+void ui_system_path_canvas_set_unit_skipped_tools(lv_obj_t* obj, int unit_index, uint32_t mask);
+
+/**
+ * @brief Set the callback for taps on a nozzle in the toolhead row
+ *
+ * Reports the tapped nozzle's physical index. Only a multi-tool row reports:
+ * a single nozzle is not a head to pick.
+ *
+ * @param obj The system_path_canvas widget
+ * @param cb Called with the physical nozzle index and @p user_data; nullptr
+ *           disables taps
+ * @param user_data Passed through to @p cb
+ */
+void ui_system_path_canvas_set_toolhead_callback(lv_obj_t* obj,
+                                                 void (*cb)(int nozzle_index, void* user_data),
+                                                 void* user_data);
+
+/**
  * @brief Set how far the active filament has reached (a PathSegment value)
  */
 void ui_system_path_canvas_set_filament_segment(lv_obj_t* obj, int segment);

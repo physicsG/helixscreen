@@ -281,6 +281,8 @@ class AmsOverviewPanel : public PanelBase {
     /// @p node is whether the bypass node belongs on the path (bypass_node_visible_for).
     void refresh_page_bypass(bool node);
     static void on_bypass_spool_clicked(lv_event_t* e);
+    /// A tap on a nozzle in the system path: offer that tool's change.
+    static void on_toolhead_clicked(int nozzle_index, void* user_data);
 
     // === Sidebar ===
     std::unique_ptr<helix::ui::AmsOperationSidebar> sidebar_;

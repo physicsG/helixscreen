@@ -1250,7 +1250,11 @@ void AmsBackendSnapmaker::run_runout_refeed(int slot, ResumeReadyCallback on_rea
         refeed_in_flight_ = true;
     }
 
-    std::string chain = fmt::format("AUTO_FEEDING EXTRUDER={0} LOAD=1 PRINTING=1", slot);
+    // No PRINTING=1, for the same reason do_load_filament() omits it: FEED_AUTO
+    // silent-returns ("LOAD skipped: channel[N] is_printing=1") when PRINTING is
+    // set and the port sensor reads no filament, which is the state a runout
+    // leaves behind.
+    std::string chain = fmt::format("AUTO_FEEDING EXTRUDER={0} LOAD=1", slot);
     spdlog::info("{} prepare_for_resume: tool {} runout latched — driving AMS load "
                  "(AUTO_FEEDING) before RESUME",
                  backend_log_tag(), slot);
@@ -2188,8 +2192,9 @@ void AmsBackendSnapmaker::apply_channel_progress_locked(int i, const std::string
     // so an incremental status omitting it doesn't clear the
     // phase spuriously.
     if (!state.empty()) {
-        if (system_info_.operation_phase != info.phase) {
-            system_info_.operation_phase = info.phase;
+        const int phase = step_phase_locked(i, info);
+        if (system_info_.operation_phase != phase) {
+            system_info_.operation_phase = phase;
             fx.changed = true;
         }
     }

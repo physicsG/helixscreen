@@ -208,10 +208,12 @@ LaneIdentity read_lane_identity(const nlohmann::json& lane, LaneSurface surface)
     // `filament_name`, AFCLane's attribute; lane_data uses `name`, the shared
     // spelling Happy Hare publishes (#833), and the attribute name defensively.
     // get_status is not offered `name`: there it would be the lane's own name.
-    const auto name_keys = surface == LaneSurface::LaneData
-                               ? std::initializer_list<const char*>{"name", "filament_name"}
-                               : std::initializer_list<const char*>{"filament_name"};
-    for (const char* key : name_keys) {
+    // One array, entered past `name` on get_status: an initializer_list picked
+    // by a ternary would dangle once that statement ends.
+    static constexpr const char* kNameKeys[] = {"name", "filament_name"};
+    const size_t first_key = surface == LaneSurface::LaneData ? 0 : 1;
+    for (size_t i = first_key; i < std::size(kNameKeys); ++i) {
+        const char* key = kNameKeys[i];
         if (auto v = ams::read_field<std::string>(lane, key)) {
             id.spool_name = std::move(*v);
             break;

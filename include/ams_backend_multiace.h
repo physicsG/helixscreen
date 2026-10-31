@@ -46,9 +46,21 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// else, bays included (a bay is where its spool lives).
     [[nodiscard]] std::optional<int> upstream_slot(int slot_index) const override;
 
+    /// A bay swap on an ACE-fed head (its unload, then the bay's load) is one
+    /// operation with one bar; everything else is the U1's own model.
+    [[nodiscard]] OperationStepModel get_operation_step_model(StepOperationType op) const override;
+    /// A swap in flight is named as the load it started as, so a bar rebuilt
+    /// between its halves is the swap's again.
+    [[nodiscard]] std::optional<StepOperationType> running_step_operation() const override;
+
+    /// Every ACE-fed head, routed or not: the ACE holds its spool even before
+    /// the engine says which bay is at the head.
+    [[nodiscard]] bool lane_spool_is_upstream(int slot_index) const override;
+
     /// Bays number the spools 1-based in global order; a routed head wears
     /// its bay's number so the two lanes count one spool, and the numbers on
-    /// the lanes that hold their own spools stay consecutive.
+    /// the lanes that hold their own spools stay consecutive. An ACE-fed head
+    /// with no routed bay holds no spool and answers 0.
     [[nodiscard]] int spool_display_number(int slot_index) const override;
 
     /// A bay into a head holding another bay is not a swap for the screen to
@@ -112,6 +124,11 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     AmsError do_park_active_tool() override;
     AmsError do_filament_batch(const std::vector<int>& slots, bool load) override;
 
+    /// Inside a swap, both halves' firmware steps land on the swap bar.
+    [[nodiscard]] int step_phase_locked(int head,
+                                        const snapmaker::ChannelStateInfo& info) const override;
+    [[nodiscard]] std::optional<AmsAction> step_action_locked() const override;
+
     [[nodiscard]] bool head_is_upstream_fed_locked(int head) const override;
     [[nodiscard]] bool preload_finish_ends_unload_locked(int head) const override;
     /// While the engine is active, Resume never sends the stock AUTO_FEEDING load.
@@ -171,6 +188,17 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// empty. Moonraker batches status, so the frame can trail the answer.
     static constexpr std::chrono::seconds kPendingLoadGrace{15};
 
+    /// Reads multiACE's slot_overrides.json and lays it over the bays. One
+    /// download at a time; a request made while one is out runs when it
+    /// returns. Takes mutex_ itself.
+    void fetch_slot_overrides();
+
+    /// Follows a swap across frames: which half is running, and its end.
+    /// Caller holds mutex_.
+    void track_swap_locked();
+    /// Forgets the swap in flight. Caller holds mutex_.
+    void end_swap_locked();
+
     /// Drops a pending bay load: another filament op owns the heads now.
     void cancel_pending_load(const char* why);
 
@@ -198,11 +226,33 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     std::string swap_phase_;
     multiace::LastSwap last_swap_;
     int64_t event_seq_ = -1;
+
+    /// multiACE's own statement of what each bay holds: its spool table and
+    /// bindings, with slot_overrides.json laid over them. It outranks the lane
+    /// model for any bay it describes. All under mutex_.
+    nlohmann::json spools_ = nlohmann::json::object();
+    nlohmann::json spool_binding_ = nlohmann::json::object();
+    multiace::BayDeclarations slot_overrides_;
+    multiace::BayDeclarations declarations_;
+    /// event_seq the last override download was asked for: the file lives on
+    /// disk, and the engine bumps event_seq on every state change it makes.
+    int64_t overrides_seq_ = -2;
+    bool override_fetch_in_flight_ = false;
+    bool override_refetch_wanted_ = false;
     /// api_version mismatch already logged, so a stream of frames logs once.
     bool api_mismatch_logged_ = false;
 
     /// Under mutex_.
     std::optional<PendingBayLoad> pending_load_;
+
+    /// The head a bay swap is running on, -1 for none, from the moment the
+    /// unload goes out until the load half ends. Under mutex_.
+    int swap_head_ = -1;
+    /// The firmware has reported the swap running.
+    bool swap_progress_seen_ = false;
+    /// The bay's load was sent, and has since been reported running.
+    bool swap_load_sent_ = false;
+    bool swap_load_half_started_ = false;
     uint64_t next_pending_id_ = 1;
 
     /// head_source load-failure notices staged under mutex_ by

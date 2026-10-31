@@ -3,6 +3,8 @@
 
 #include "ui_panel_ams_overview.h"
 
+#include "tool_change_request.h"
+
 #include "ui_ams_context_menu.h"
 #include "ui_ams_detail.h"
 #include "ui_ams_environment_overlay.h"
@@ -113,11 +115,42 @@ static uint32_t upstream_lane_mask(const AmsUnit& unit) {
     uint32_t mask = 0;
     const int lanes = static_cast<int>(unit.slots.size());
     for (int s = 0; s < lanes && s < 32; ++s) {
-        if (backend->upstream_slot(unit.first_slot_global_index + s).has_value()) {
+        if (backend->lane_spool_is_upstream(unit.first_slot_global_index + s)) {
             mask |= (1u << s);
         }
     }
     return mask;
+}
+
+/// The physical nozzles @p unit's lanes reach only through an upstream unit:
+/// bit n set means the unit draws no lane to nozzle n.
+static uint32_t upstream_nozzle_mask(const AmsUnit& unit, const ams_draw::SystemToolLayout& layout,
+                                     const AmsBackend* backend) {
+    if (!backend) {
+        return 0;
+    }
+    uint32_t mask = 0;
+    for (const SlotInfo& slot : unit.slots) {
+        if (slot.mapped_tool < 0 || !backend->lane_spool_is_upstream(slot.global_index)) {
+            continue;
+        }
+        const auto it = layout.virtual_to_physical.find(slot.mapped_tool);
+        if (it != layout.virtual_to_physical.end() && it->second >= 0 && it->second < 32) {
+            mask |= 1u << it->second;
+        }
+    }
+    return mask;
+}
+
+/// The unit's lanes holding a spool of their own: those upstream_lane_mask()
+/// leaves drawn.
+static int own_spool_lanes(const AmsUnit& unit) {
+    const uint32_t mask = upstream_lane_mask(unit);
+    int skipped = 0;
+    for (int s = 0; s < unit.slot_count && s < 32; ++s) {
+        skipped += (mask >> s) & 1u;
+    }
+    return unit.slot_count - skipped;
 }
 
 // ============================================================================
@@ -258,6 +291,9 @@ void AmsOverviewPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
         if (system_path_) {
             lv_obj_set_size(system_path_, LV_PCT(100), LV_PCT(100));
             spdlog::debug("[{}] Created system path canvas", get_name());
+
+            ui_system_path_canvas_set_toolhead_callback(
+                system_path_, &AmsOverviewPanel::on_toolhead_clicked, this);
 
             bypass_widgets_ = helix::ui::bypass_spool_create(
                 system_path_area_, &AmsOverviewPanel::on_bypass_spool_clicked, this);
@@ -532,7 +568,7 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info, helix::ui::L
             lv_label_set_text(uc.name_label, uc.display_name.c_str());
         }
 
-        set_slot_count_label(uc.slot_count_label, noun, unit.slot_count);
+        set_slot_count_label(uc.slot_count_label, noun, own_spool_lanes(unit));
 
         // Create the mini bars for this unit (dynamic — slot count varies)
         create_mini_bars(uc, unit);
@@ -591,7 +627,7 @@ void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit,
     }
 
     // Update slot count
-    set_slot_count_label(card.slot_count_label, noun, unit.slot_count);
+    set_slot_count_label(card.slot_count_label, noun, own_spool_lanes(unit));
 
     // Update error badge visibility and color
     if (card.error_badge) {
@@ -819,6 +855,8 @@ void AmsOverviewPanel::refresh_system_path(const AmsSystemInfo& info, int curren
             const auto& utl = tool_layout.units[i];
             ui_system_path_canvas_set_unit_tools(system_path_, i, utl.tool_count,
                                                  utl.first_physical_tool);
+            ui_system_path_canvas_set_unit_skipped_tools(
+                system_path_, i, upstream_nozzle_mask(unit, tool_layout, backend));
 
             // The unit's hub and the buffer under it: the box the unit view shows
             // for the hub's first unit. Units on one hub get one group number.
@@ -1688,6 +1726,27 @@ void AmsOverviewPanel::on_bypass_spool_clicked(lv_event_t* e) {
     if (auto* self = static_cast<AmsOverviewPanel*>(lv_event_get_user_data(e))) {
         self->handle_bypass_click();
     }
+}
+
+void AmsOverviewPanel::on_toolhead_clicked(int nozzle_index, void* user_data) {
+    auto* self = static_cast<AmsOverviewPanel*>(user_data);
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!self || !backend || nozzle_index < 0) {
+        return;
+    }
+    // The nozzle's tool, from the same layout the canvas was drawn from.
+    const auto layout = ams_draw::compute_system_tool_layout(backend->get_system_info(), backend);
+    int tool_index = -1;
+    for (const auto& [tool, phys] : layout.virtual_to_physical) {
+        if (phys == nozzle_index && (tool_index < 0 || tool < tool_index)) {
+            tool_index = tool;
+        }
+    }
+    if (tool_index < 0) {
+        return;
+    }
+    spdlog::info("[{}] Nozzle {} tapped: offering T{}", self->get_name(), nozzle_index, tool_index);
+    (void)helix::ui::offer_tool_change(self->printer_state_, tool_index);
 }
 
 void AmsOverviewPanel::handle_bypass_click() {
