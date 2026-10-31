@@ -112,16 +112,10 @@ jobs:
             docker/
 
       - name: Cross-compile for Snapmaker U1
-        env:
-          # A cross build carries the helixctl server by default, and
-          # release-snapmaker-u1 refuses to package a binary that does -- it
-          # reads the remote_control= stamp mk/rules.mk writes at link time, so
-          # the flag has to be set HERE, at the build, not at the packaging
-          # step. HELIX_PACKAGING=1 is what turns the server off.
-          #
-          # Only on a u1-v* tag. Branch builds keep the server on purpose: that
-          # is what makes a dev cross build drivable on the device.
-          PACKAGING: ${{ startsWith(github.ref, 'refs/tags/u1-v') && 'HELIX_PACKAGING=1' || '' }}
+        # release-snapmaker-u1 refuses a binary carrying the helixctl server and
+        # requires the diagnostic-upload marker, both read from the stamp
+        # mk/rules.mk writes at link time, so HELIX_PACKAGING=1 has to be set
+        # here at the build, for branch builds as much as for a u1-v* tag.
         run: |
           docker run --rm \
             -v "${{ github.workspace }}":/src \
@@ -129,7 +123,7 @@ jobs:
             -w /src \
             -e HELIX_PATCHES_FROM_CLEAN \
             helixscreen/toolchain-snapmaker-u1 \
-            make PLATFORM_TARGET=snapmaker-u1 SKIP_OPTIONAL_DEPS=1 $PACKAGING -j$(nproc)
+            make PLATFORM_TARGET=snapmaker-u1 SKIP_OPTIONAL_DEPS=1 HELIX_PACKAGING=1 -j$(nproc)
 
       - name: Show ccache stats
         run: |
